@@ -2,6 +2,7 @@ from dataclasses import Field
 from typing import TypeAliasType, get_origin, Literal, get_args
 
 from flat.py import fuzz as fuzz_annot
+from flat.py.annot_eval import AnnotEvaluator
 from flat.py.ast_factory import *
 from flat.py.rewrite import cnf, ISLaConvertor, subst
 from flat.py.runtime import *
@@ -131,10 +132,11 @@ class Instrumentor(ast.NodeTransformer):
         self._functions: dict[str, FunSig] = {}
 
     def __call__(self, source: str, code: str) -> str:
-        self._env: dict[str, Any] = {}
-        exec(code, self._env, self._env)
-
         tree = ast.parse(code)
+        evaluator = AnnotEvaluator()
+        evaluator.visit(tree)
+        self._env = evaluator.env
+        
         self._last_lineno = 0
         self._stack: list[FunContext] = []
         self.filename = source
@@ -162,7 +164,7 @@ class Instrumentor(ast.NodeTransformer):
         return body
 
     def expand(self, annot: ast.expr) -> Optional[Type]:
-        obj = eval(ast.unparse(annot), {}, self._env)
+        obj = eval(ast.unparse(annot), self._env)
         return to_type(obj)
 
     def fresh_name(self) -> str:
