@@ -1,19 +1,20 @@
-from typing import get_origin, Literal
+from dataclasses import Field
+from typing import TypeAliasType, get_origin, Literal, get_args
 
-from flat.py import fuzz as fuzz_annot, PyCond
-from flat.py.rewrite import cnf, ISLaConvertor, free_vars, subst
+from flat.py import fuzz as fuzz_annot
+from flat.py.ast_factory import *
+from flat.py.rewrite import cnf, ISLaConvertor, subst
 from flat.py.runtime import *
-from flat.py.utils import classify
-from flat.typing import Type, RefinementType, LiteralType
+from flat.typing import *
 
 
 @dataclass(frozen=True)
 class FunSig:
     """Only interesting types are specified."""
     name: str
-    params: list[Tuple[str, Optional[Type], Optional[ast.expr]]]
+    params: list[Tuple[str, Optional[Type]]]
     defaults: dict[str, ast.expr]
-    returns: Optional[Tuple[Type, ast.expr]]
+    returns: Optional[Type]
     preconditions: list[ast.expr]  # bind params
     postconditions: list[ast.expr]  # bind params and '_' for return value
 
@@ -23,61 +24,9 @@ class FunSig:
 
 
 class FunContext:
-    def __init__(self, fun: FunSig, annots: dict[str, ast.expr]):
+    def __init__(self, fun: FunSig):
         self.fun = fun
-        self.annots = annots
-
-
-def load(name: str) -> ast.Name:
-    return ast.Name(name, ctx=ast.Load())
-
-
-def const(value: int | str | None) -> ast.Constant:
-    return ast.Constant(value)
-
-
-def conjunction(conjuncts: list[ast.expr]) -> ast.expr:
-    match conjuncts:
-        case []:
-            return ast.Constant(True)
-        case [cond]:
-            return cond
-        case _:
-            return ast.BoolOp(ast.And(), conjuncts)
-
-
-def assign(var: str, value: ast.expr | int) -> ast.stmt:
-    if isinstance(value, int):
-        value = ast.Constant(value)
-
-    return ast.Assign([ast.Name(var, ctx=ast.Store())], value)
-
-
-def apply(fun: str | ast.expr, *args: int | str | ast.expr) -> ast.Call:
-    if isinstance(fun, str):
-        fun = load(fun)
-    exprs = []
-    for arg in args:
-        match arg:
-            case int() as n:
-                exprs += [ast.Constant(n)]
-            case str() as s:
-                exprs += [ast.Constant(s)]
-            case ast.expr() as e:
-                exprs += [e]
-    return ast.Call(fun, exprs, keywords=[])
-
-
-def lambda_expr(args: list[str], body: ast.expr) -> ast.Lambda:
-    return ast.Lambda(ast.arguments([], [ast.arg(x) for x in args], None, [], [], None, []), body)
-
-
-def apply_flat(fun: Callable, *args: int | str | ast.expr) -> ast.Call:
-    return apply(ast.Attribute(load('__flat__'), fun.__name__, ctx=ast.Load()), *args)
-
-
-def call_flat(fun: Callable, *args: int | str | ast.expr) -> ast.Expr:
-    return ast.Expr(apply_flat(fun, *args))
+        self.types: dict[str, Type] = {x: t for x, t in fun.params if t is not None}
 
 
 def parse_expr(code: str) -> ast.expr:
@@ -93,13 +42,84 @@ def canonical_cond(condition: ast.expr, binders: list[str]) -> ast.expr:
         case ast.Constant(str() as literal):
             return parse_expr(literal)
         case ast.Lambda(ast.arguments([], args, None, [], [], None, []), body):
-            return subst(body, dict((arg.arg, load(x)) for arg, x in zip(args, binders)))
+            return subst(body, dict((arg.arg, ast.Name(x)) for arg, x in zip(args, binders)))
         case _:
             raise TypeError
 
 
 def get_loc(node: ast.AST) -> ast.expr:
-    return apply_flat(Loc, node.lineno, node.col_offset, node.end_lineno, node.end_col_offset)
+    return mk_call_flat(Loc, node.lineno, node.col_offset, node.end_lineno, node.end_col_offset)
+
+
+def to_type(obj: Any) -> Optional[Type]:
+    """Try to convert an object to a FLAT type."""
+    match obj:
+        case Type() as t:
+            return t
+        case TypeAliasType() as ta:
+            return to_type(ta.__value__)
+        case type():
+            if hasattr(obj, '__dataclass_fields__'):  # data class
+                fields: dict[str, Field] = getattr(obj, '__dataclass_fields__')
+                ts = {}
+                for x, f in fields.items():
+                    t = to_type(f.type)
+                    if t:
+                        ts[x] = t
+                    else:
+                        return None
+                return RecordType(obj, ts)
+
+            if get_origin(obj) is Literal:  # literal type
+                values = get_args(obj)
+                assert len(values) > 0
+                assert all(isinstance(v, str) for v in values)
+                return LangType.from_literals(values)
+
+            return None
+
+
+def synth_producer(typ: Type, env: dict[str, Any]) -> ast.expr:
+    match typ:
+        case LangType(g):
+            assert isinstance(g, CFG)
+            return mk_call_flat(ISLaProducer, to_expr(g))
+        case ListType(t):
+            return mk_call_flat(ListProducer, synth_producer(t, env))
+        case TupleType(ts):
+            return mk_call_flat(TupleProducer, ast.List(synth_producer(t, env) for t in ts))
+        case RecordType(k, ts):
+            return mk_call_flat(RecordProducer, to_expr(k),
+                                ast.List(synth_producer(t, env) for t in ts.values()))
+        case RefinedType(LangType(g), e):
+            assert isinstance(e, ast.Lambda)
+            convert = ISLaConvertor(env)
+            formulae: list[str] = []  # conjuncts that isla can solve
+            test_conditions: list[ast.expr] = []  # other conjuncts: fall back to Python
+            for cond in cnf(e):
+                match convert(cond, '_'):
+                    case None:
+                        test_conditions += [cond]
+                    case f:
+                        formulae += [f]  # type: ignore
+
+            match formulae:
+                case []:
+                    formula = None
+                case [f]:
+                    formula = f
+                case _:
+                    formula = ' and '.join(formulae)
+
+            isla_producer = mk_call_flat(ISLaProducer, to_expr(g), formula)
+            if len(test_conditions) == 0:
+                return isla_producer
+            return mk_call_flat(FilterProducer, isla_producer, mk_and(test_conditions))
+        case RefinedType(t, p):
+            assert isinstance(p, ast.Lambda)
+            return mk_call_flat(FilterProducer, synth_producer(t, env), p)
+
+    raise TypeError(f"cannot generate producer for type '{typ}'")
 
 
 class Instrumentor(ast.NodeTransformer):
@@ -112,7 +132,7 @@ class Instrumentor(ast.NodeTransformer):
 
     def __call__(self, source: str, code: str) -> str:
         self._env: dict[str, Any] = {}
-        exec(code, {}, self._env)
+        exec(code, self._env, self._env)
 
         tree = ast.parse(code)
         self._last_lineno = 0
@@ -123,12 +143,12 @@ class Instrumentor(ast.NodeTransformer):
         except InstrumentError as err:
             err.print()
 
-        import_runtime = ast.parse('from flat.py import runtime as __flat__').body[0]
+        import_flat = ast.parse('import flat.py.runtime').body[0]
         set_source = ast.parse(f'__source__ = "{self.filename}"').body[0]
-        tree.body.insert(0, import_runtime)
+        tree.body.insert(0, import_flat)
         tree.body.insert(1, set_source)
-        tree.body.insert(2, call_flat(load_source_module, ast.Name('__source__')))
-        tree.body.append(call_flat(run_main, load('main')))
+        tree.body.insert(2, mk_invoke_flat(load_source_module, ast.Name('__source__')))
+        tree.body.append(mk_invoke_flat(run_main, ast.Name('main')))
         ast.fix_missing_locations(tree)
         return ast.unparse(tree)
 
@@ -136,22 +156,14 @@ class Instrumentor(ast.NodeTransformer):
         # assert self._inside_body
         body = []
         if lineno != self._last_lineno:
-            body += [assign('__line__', lineno)]
+            body += [mk_assign('__line__', lineno)]
             self._last_lineno = lineno
 
         return body
 
     def expand(self, annot: ast.expr) -> Optional[Type]:
-        match eval(ast.unparse(annot), {}, self._env):
-            case Type() as typ:
-                return typ
-            case other:
-                if get_origin(other) is Literal:  # literal type
-                    values = get_args(other)
-                    assert len(values) > 0
-                    assert all(isinstance(v, int) or isinstance(v, bool) or isinstance(v, str) for v in values)
-                    return LiteralType(values)
-                return None
+        obj = eval(ast.unparse(annot), {}, self._env)
+        return to_type(obj)
 
     def fresh_name(self) -> str:
         self._next_id += 1
@@ -165,7 +177,8 @@ class Instrumentor(ast.NodeTransformer):
             name = self._stack[-1].fun.name
         return InstrumentError(message, self.filename, name, loc)
 
-    def extract_arg(self, index: Optional[int], name: str, required: bool, from_call: ast.Call) -> Optional[ast.expr]:
+    def extract_arg(self, index: Optional[int], name: str, required: bool,
+                    from_call: ast.Call) -> Optional[ast.expr]:
         # try args
         if index is not None and len(from_call.args) > index:
             for keyword in from_call.keywords:
@@ -189,30 +202,31 @@ class Instrumentor(ast.NodeTransformer):
         annots = {}
 
         # check arg types
-        params: list[Tuple[str, Optional[Type], Optional[ast.expr]]] = []
+        params: list[Tuple[str, Optional[Type]]] = []
         for arg in node.args.args:
             x = arg.arg
             if arg.annotation:
-                typ = self.expand(arg.annotation)
-                if typ:
+                t = self.expand(arg.annotation)
+                if t:
                     annots[x] = arg.annotation
-                    body += [call_flat(assert_arg_type, load(x), len(params), node.name, arg.annotation)]
+                    body += [mk_invoke_flat(assert_arg_type, ast.Name(x), len(params), node.name,
+                                            to_expr(t))]
             else:
-                typ = None
-            params.append((x, typ, arg.annotation))
+                t = None
+            params.append((x, t))
 
         # record default value
         defaults: dict[str, Optional[ast.expr]] = {}
-        for (x, _, _), default in zip(reversed(params), reversed(node.args.defaults)):
+        for (x, _), default in zip(reversed(params), reversed(node.args.defaults)):
             defaults[x] = default
 
         # check return type
         if node.returns:
             match self.expand(node.returns):
                 case None:
-                    returns = None
-                case typ:
-                    returns = typ, node.returns
+                    returns: Optional[Type] = None
+                case t:
+                    returns = t
         else:
             returns = None
 
@@ -221,15 +235,16 @@ class Instrumentor(ast.NodeTransformer):
         postconditions: list[ast.expr] = []
         exc_info: list[ast.Tuple] = []  # cond_var name, exc_type, loc
         processed: list[ast.expr] = []
-        arg_names = [x for x, _, _ in params]
+        arg_names = [x for x, _ in params]
         for decorator in node.decorator_list:
             match decorator:
                 case ast.Call(ast.Name('requires'), [condition]):
                     pre = canonical_cond(condition, arg_names)
                     preconditions.append(pre)
                     body += self.track_lineno(decorator.lineno)
-                    body += [call_flat(assert_pre, pre,
-                                       ast.List([ast.Tuple([const(x), load(x)]) for x in arg_names]), node.name)]
+                    body += [mk_invoke_flat(assert_pre, pre,
+                                            ast.List([ast.Tuple([ast.Constant(x), ast.Name(x)]) for x in arg_names]),
+                                            node.name)]
                     processed.append(decorator)  # to remove it
                 case ast.Call(ast.Name('ensures'), [condition]):
                     post = canonical_cond(condition, arg_names + ['_'])
@@ -238,7 +253,7 @@ class Instrumentor(ast.NodeTransformer):
                     processed.append(decorator)  # to remove it
                 case ast.Call(ast.Name('returns'), [value]):
                     value = canonical_cond(value, arg_names)
-                    post = ast.Compare(load('_'), [ast.Eq()], [value])
+                    post = ast.Compare(ast.Name('_'), [ast.Eq()], [value])
                     post.lineno = decorator.lineno
                     postconditions.append(post)
                     processed.append(decorator)  # to remove it
@@ -246,8 +261,8 @@ class Instrumentor(ast.NodeTransformer):
                     exc_type = self.extract_arg(0, 'exc', True, call)
                     cond = canonical_cond(self.extract_arg(1, 'cond', True, call), arg_names)
                     cond_var = f'__exc_cond_{len(exc_info)}__'
-                    body += [assign(cond_var, cond)]
-                    exc_info.append(ast.Tuple([load(cond_var), exc_type, get_loc(decorator)]))
+                    body += [mk_assign(cond_var, cond)]
+                    exc_info.append(ast.Tuple([ast.Name(cond_var), exc_type, get_loc(decorator)]))
                     processed.append(decorator)  # to remove it
 
         for x in processed:
@@ -263,7 +278,7 @@ class Instrumentor(ast.NodeTransformer):
         else:  # no wrap
             body_buffer = body
 
-        self._stack.append(FunContext(sig, annots))
+        self._stack.append(FunContext(sig))
         for stmt in node.body:
             match self.visit(stmt):
                 case ast.stmt() as s:
@@ -273,9 +288,9 @@ class Instrumentor(ast.NodeTransformer):
         self._stack.pop()
 
         if len(exc_info) > 0:
-            handler = apply_flat(ExpectExceptions, ast.List([t for t in exc_info]))
+            handler = mk_call_flat(ExpectExceptions, ast.List([t for t in exc_info]))
             with_item = ast.withitem(handler)
-            with_stmt = ast.With([with_item], body_buffer, type_ignores=[])
+            with_stmt = ast.With([with_item], body_buffer)
             body.append(with_stmt)
         node.body = body
         return node
@@ -290,8 +305,9 @@ class Instrumentor(ast.NodeTransformer):
         body += [node]
         for target in node.targets:
             for var in vars_in_target(target):
-                if var in ctx.annots:
-                    body += [call_flat(assert_type, node.value, get_loc(node.value), ctx.annots[var])]
+                if var in ctx.types:
+                    body += [mk_invoke_flat(assert_type, node.value, get_loc(node.value),
+                                            to_expr(ctx.types[var]))]
 
         return body
 
@@ -306,9 +322,10 @@ class Instrumentor(ast.NodeTransformer):
         body += [node]
         match node.target:
             case ast.Name(var):
-                if self.expand(node.annotation) is not None:
-                    ctx.annots[var] = node.annotation
-                    body += [call_flat(assert_type, node.value, get_loc(node.value), ctx.annots[var])]
+                t = self.expand(node.annotation)
+                if t:
+                    ctx.types[var] = t
+                    body += [mk_invoke_flat(assert_type, node.value, get_loc(node.value), to_expr(t))]
             case _:
                 raise TypeError
 
@@ -324,8 +341,9 @@ class Instrumentor(ast.NodeTransformer):
         body += [node]
         match node.target:
             case ast.Name(var):
-                if var in ctx.annots:
-                    body += [call_flat(assert_type, node.value, get_loc(node.value), ctx.annots[var])]
+                if var in ctx.types:
+                    body += [mk_invoke_flat(assert_type, node.value, get_loc(node.value),
+                                            to_expr(ctx.types[var]))]
 
         return body
 
@@ -333,31 +351,31 @@ class Instrumentor(ast.NodeTransformer):
         if node.value:
             node.value = self.visit(node.value)
         else:
-            node.value = const(None)
+            node.value = ast.Constant(None)
 
         ctx = self._stack[-1]
         body = self.track_lineno(node.lineno)
         if ctx.fun.returns is None and len(ctx.fun.postconditions) == 0:  # no check, just return
             return body + [node]
 
-        body += [assign('__return__', node.value)]
+        body += [mk_assign('__return__', node.value)]
         if ctx.fun.returns:
-            body += [call_flat(assert_type, load('__return__'), get_loc(node.value), ctx.fun.returns[1])]
+            body += [mk_invoke_flat(assert_type, ast.Name('__return__'), get_loc(node.value), ctx.fun.returns[1])]
 
         arg_names = [x for x in ctx.fun.param_names]
         for cond in ctx.fun.postconditions:  # note: return value is '_' in cond
             body += self.track_lineno(cond.lineno)
-            body += [call_flat(assert_post, subst(cond, {'_': load('__return__')}),
-                               ast.List([ast.Tuple([const(x), load(x)]) for x in arg_names]),
-                               load('__return__'), get_loc(node.value), const(ctx.fun.name))]
+            body += [mk_invoke_flat(assert_post, subst(cond, {'_': ast.Name('__return__')}),
+                                    ast.List([ast.Tuple([ast.Constant(x), ast.Name(x)]) for x in arg_names]),
+                                    ast.Name('__return__'), get_loc(node.value), ast.Constant(ctx.fun.name))]
         body += self.track_lineno(node.lineno)
-        body += [ast.Return(load('__return__'))]
+        body += [ast.Return(ast.Name('__return__'))]
         return body
 
     def visit_Call(self, node: ast.Call):
         match node:
             case ast.Call(ast.Name('isinstance'), [obj, typ]) if self.expand(typ) is not None:
-                return apply_flat(has_type, obj, typ)
+                return mk_call_flat(has_type, obj, typ)
             case ast.Call(ast.Name('fuzz')) as call if self._env['fuzz'] == fuzz_annot:
                 fun = None
                 target = self.extract_arg(0, 'target', True, call)
@@ -386,7 +404,7 @@ class Instrumentor(ast.NodeTransformer):
                                     raise self.error('expect argument name', key)
                     case other:
                         raise self.error('expect dict', other)
-                return apply_flat(fuzz, target, times, self._producer(fun, using))
+                return mk_call_flat(fuzz_test, target, times, self._producer(fun, using))
             case _:
                 return super().generic_visit(node)
 
@@ -407,7 +425,7 @@ class Instrumentor(ast.NodeTransformer):
     def visit_MatchAs(self, node: ast.MatchAs):
         match node:
             case ast.MatchAs(ast.MatchClass(cls, [], [], []), x) if self.expand(cls) is not None:
-                self._case_guards.append(apply_flat(has_type, load(x), cls))
+                self._case_guards.append(mk_call_flat(has_type, ast.Name(x), cls))
                 return ast.MatchAs(None, x)
             case _:
                 return super().generic_visit(node)
@@ -416,7 +434,7 @@ class Instrumentor(ast.NodeTransformer):
         match node:
             case ast.MatchClass(cls, [], [], []) if self.expand(cls) is not None:
                 x = self.fresh_name()
-                self._case_guards.append(apply_flat(has_type, load(x), cls))
+                self._case_guards.append(mk_call_flat(has_type, ast.Name(x), cls))
                 return ast.MatchAs(None, x)
             case _:
                 return super().generic_visit(node)
@@ -434,63 +452,20 @@ class Instrumentor(ast.NodeTransformer):
         return super().generic_visit(node)
 
     def _producer(self, fun: FunSig, using_producers: dict[str, ast.expr]) -> ast.expr:
-        pre_conjuncts = [c for pre in fun.preconditions for c in cnf(pre)]
-        convert = ISLaConvertor(self._env)
-
+        # pre_conjuncts = [c for pre in fun.preconditions for c in cnf(pre)]
         producers: list[ast.expr] = []
-        for x, typ, annot in fun.params:
+        for x, t in fun.params:
             if x in using_producers:
                 producers += [using_producers[x]]
             elif x in fun.defaults:  # use default value
-                producers += [apply_flat(constant_generator, fun.defaults[x])]
-            elif typ and typ.is_lang_type:  # synthesize an isla producer
-                formulae: list[str] = []  # conjuncts that isla can solve
-                test_conditions: list[ast.expr] = []  # other conjuncts: fall back to Python
-                if isinstance(typ, RefinementType) and isinstance(typ.cond, PyCond):
-                    for cond in cnf(typ.cond.expr):
-                        match convert(cond, '_'):
-                            case None:
-                                test_conditions += [cond]
-                            case f:
-                                formulae += [f]  # type: ignore
-
-                # pick conjuncts that could be written in the refinement position
-                # i.e., it is a predicate over the param x only
-                picked, pre_conjuncts = classify(lambda c: free_vars(c) & (set(fun.param_names) - {x}) == set(),
-                                                 pre_conjuncts)
-                for cond in picked:
-                    match convert(cond, x):
-                        case None:
-                            test_conditions += [subst(cond, {x: load('_')})]
-                        case f:
-                            formulae += [f]  # type: ignore
-
-                match formulae:
-                    case []:
-                        formula = const(None)
-                    case [f]:
-                        formula = const(f)
-                    case _:
-                        formula = const(' and '.join(formulae))
-
-                assert annot is not None
-                if isinstance(typ, RefinementType):
-                    annot = ast.Attribute(annot, 'base', ctx=ast.Load())
-                producers += [
-                    apply_flat(producer,
-                               apply_flat(isla_generator, annot, formula),
-                               lambda_expr(['_'], conjunction(test_conditions)))
-                ]
-            elif isinstance(typ, LiteralType):
-                if len(typ.values) == 1:
-                    producers += [apply_flat(constant_generator, typ.values[0])]
-                else:
-                    producers += [apply_flat(choice_generator, ast.List([ast.Constant(v) for v in typ.values]))]
+                producers += [mk_call_flat(ConstProducer, fun.defaults[x])]
+            elif t:
+                producers += [synth_producer(t, self._env)]
             else:
-                raise TypeError(f'must specify producer for param {x}, specified are {using_producers}')
+                assert t is None
+                raise TypeError(f'must specify producer for param `{x}`')
 
-        return apply_flat(product_producer, ast.List(producers),
-                          lambda_expr(fun.param_names, conjunction(pre_conjuncts)))
+        return mk_call_flat(TupleProducer, ast.List(producers))
 
 
 def vars_in_target(expr: ast.expr) -> list[str]:

@@ -1,14 +1,15 @@
 import ast
-from dataclasses import dataclass
-from typing import Any, Callable, Generator, Tuple, Literal
+import inspect
+from typing import Callable, Tuple, Literal
 
 import flat.parser
+from flat.py.ast_factory import parse_expr
 from flat.types import *
-from flat.typing import LangType, RefinementType, Cond, BuiltinType, Value, ListType
+from flat.typing import *
 
 
-class LangBuilder(GrammarBuilder):
-    def lookup_lang(self, name: str) -> Optional[Grammar]:
+class LangBuilder(CFGBuilder):
+    def lookup_lang(self, name: str) -> Optional[CFG]:
         match name:
             case 'RFC_Email':
                 return RFC_Email.grammar
@@ -37,53 +38,39 @@ def lang(name: str, rules: str) -> LangType:
     return LangType(grammar)
 
 
-class PyCond(Cond):
-    expr: ast.expr
-
-    def __init__(self, code: str):
-        match ast.parse(code).body[0]:
-            case ast.Expr(expr):
-                self.expr = expr
-            case _:
-                raise TypeError
-
-    def __and__(self, other):
-        if isinstance(other, PyCond):
-            return PyCond(ast.And([self.expr, other.expr]))
-        raise TypeError
-
-    def apply(self, value: Value) -> bool:
-        env = sys.modules['_.source'].__dict__
-        match eval(ast.unparse(self.expr), env, {'_': value}):
-            case bool() as b:
-                return b
-            case _:
-                raise TypeError
-
-    def __str__(self) -> str:
-        return ast.unparse(self.expr)
-
-
-def refine(base_type: type | LangType | RefinementType, refinement: str) -> RefinementType:
-    cond = PyCond(refinement)
-    match base_type:
-        case type() as ty if ty in [int, bool, str]:
-            return RefinementType(
-                BuiltinType.Int if ty == int else BuiltinType.Bool if ty == bool else BuiltinType.String, cond)
-        case LangType() as t:
-            return RefinementType(t, cond)
-        case RefinementType(base, base_cond):
-            new_cond = cond if base_cond is None else (base_cond and cond)
-            return RefinementType(base, new_cond)
+def refine(base: type | Type, refinement: Any) -> RefinedType:
+    match base:
+        case type() as ty:
+            if ty is int:
+                t = BuiltinType.Int
+            elif ty is bool:
+                t = BuiltinType.Bool
+            elif ty is str:
+                t = BuiltinType.String
+            else:
+                raise TypeError("expect a FLAT Type")
+        case Type() as ty:
+            t = ty
         case _:
-            raise TypeError
+            raise TypeError("expect a FLAT Type")
+    match refinement:
+        case str() as s:
+            e = parse_expr(s)
+            # lambda _: e
+            p = ast.Lambda(ast.arguments([], [ast.arg('_')], None, [], [], None, []), e)
+        case Callable() as f:
+            source = inspect.getsource(f)
+            match parse_expr(source):
+                case ast.Call(_, [ast.Lambda() as lam]):
+                    p = lam
+                case _:
+                    raise SyntaxError(f"Expected a lambda expression as the refinement")
 
-    # from inspect import signature
-    # sig = signature(refinement)
-    # assert len(sig.parameters.keys()) == 1
+    return RefinedType(t, p)
 
 
-def list_of(elem_type: LangType | RefinementType) -> ListType:
+@DeprecationWarning
+def list_of(elem_type: Type) -> ListType:
     return ListType(elem_type)
 
 
@@ -135,6 +122,6 @@ class FuzzReport:
     checker_time: float
 
 
-def fuzz(target: Callable, times: int,
-         using: Optional[dict[str, Generator[Any, None, None]]] = None) -> FuzzReport:
+def fuzz(target: Callable,
+         times: int = 10, using: Optional[dict[str, Any]] = None) -> FuzzReport:
     raise NotImplementedError

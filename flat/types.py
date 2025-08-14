@@ -2,13 +2,13 @@ import sys
 from typing import Optional
 
 from flat.errors import ParsingError
-from flat.grammars import GrammarBuilder, Grammar
+from flat.grammars import CFGBuilder, CFG
 from flat.parser import parse_using, rules
 from flat.typing import LangType
 
 
-class LangBuilder(GrammarBuilder):
-    def lookup_lang(self, name: str) -> Optional[Grammar]:
+class LangBuilder(CFGBuilder):
+    def lookup_lang(self, name: str) -> Optional[CFG]:
         return None
 
 

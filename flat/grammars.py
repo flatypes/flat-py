@@ -1,75 +1,37 @@
-import abc
-from functools import reduce
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Optional
 
 from isla.derivation_tree import DerivationTree
-from isla.helpers import is_valid_grammar
+from isla.helpers import is_valid_grammar, unreachable_nonterminals
 from isla.solver import ISLaSolver, SemanticError
-from isla.type_defs import Grammar as ISLaGrammar
 
 from flat.ast import (Rule, Clause, Token, Symbol, CharRange, Rep, Seq, Alt, RepExactly, RepInRange, Lit, Ident)
 
 
-class Grammar:
-    def __init__(self, name: str, clauses: dict[str, Clause], isla_grammar: ISLaGrammar):
-        self.name = name
-        self.clauses = clauses
-        self.isla_solver = ISLaSolver(isla_grammar)
+@dataclass
+class CFG:
+    """Context-Free Grammar (CFG) representation."""
+    name: str
+    rules: dict[str, list[str]]
+
+    def __post_init__(self):
+        self.parser = ISLaSolver(self.rules)
 
     def __contains__(self, word: str) -> bool:
         try:
-            self.isla_solver.parse(word, skip_check=True, silent=True)
+            self.parser.parse(word, skip_check=True, silent=True)
             return True
         except (SyntaxError, SemanticError):
             return False
 
     def parse(self, word: str) -> DerivationTree:
-        return self.isla_solver.parse(word, skip_check=True, silent=True)
-
-    def count(self, target: str, clause: Clause | str, direct: bool):
-        """Count how many times a `target` nonterminal can appear in a parse tree derived from `clause`.
-        If `direct` is set, only consider the direct children; otherwise the full tree.
-        Return:
-        - 0 if `target` does not appear on all trees;
-        - 1 if `target` appears exactly once on all trees;
-        - 2 if either `target` appears multiple times or undetermined.
-        """
-
-        def acc(n1, n2):
-            """Addition of times: min(2, n1 + n2)."""
-            match n1 + n2:
-                case 0:
-                    return 0
-                case 1:
-                    return 1
-                case _:
-                    return 2
-
-        if isinstance(clause, str):
-            clause = self.clauses[clause]
-
-        match clause:
-            case Symbol(name):
-                n = 1 if name == target else 0
-                if not direct:
-                    n = acc(n, self.count(target, self.clauses[name], direct))
-                return n
-            case Rep(clause, _):
-                if self.count(target, clause, direct) == 0:
-                    return 0
-                return 2
-            case Seq(clauses):
-                return reduce(acc, [self.count(target, clause, direct) for clause in clauses])
-            case Alt(clauses):
-                return reduce(lambda v1, v2: v1 if v1 == v2 else 2,
-                              [self.count(target, clause, direct) for clause in clauses])
-            case _:  # terminal clause
-                return 0
+        return self.parser.parse(word, skip_check=True, silent=True)
 
 
-class GrammarBuilder:
-    @abc.abstractmethod
-    def lookup_lang(self, name: str) -> Optional[Grammar]:
+class CFGBuilder(ABC):
+    @abstractmethod
+    def lookup_lang(self, name: str) -> Optional[CFG]:
         raise NotImplementedError
 
     def validate(self, rules: list[Rule]) -> dict[str, Rule]:
@@ -133,66 +95,66 @@ class GrammarBuilder:
             check(rule.body)
         return grammar
 
-    def reduce(self, grammar: dict[str, Rule]) -> dict[str, Clause]:
-        clauses: dict[str, Clause] = {}
+    # def reduce(self, grammar: dict[str, Rule]) -> dict[str, Clause]:
+    #     clauses: dict[str, Clause] = {}
 
-        def collect_used(clause: Clause, buf: set[str]) -> None:
-            match clause:
-                case Symbol(Ident(name)):
-                    if name in grammar:
-                        buf.add(name)
-                    elif name not in clauses:
-                        g = self.lookup_lang(name)
-                        clauses[name] = g.clauses['start']
-                        for k in g.clauses:
-                            if k != 'start':
-                                assert k not in clauses
-                                clauses[k] = g.clauses[k]
-                case Rep(c, _):
-                    collect_used(c, buf)
-                case Seq(cs):
-                    for c in cs:
-                        collect_used(c, buf)
-                case Alt(cs):
-                    for c in cs:
-                        collect_used(c, buf)
+    #     def collect_used(clause: Clause, buf: set[str]) -> None:
+    #         match clause:
+    #             case Symbol(Ident(name)):
+    #                 if name in grammar:
+    #                     buf.add(name)
+    #                 elif name not in clauses:
+    #                     g = self.lookup_lang(name)
+    #                     clauses[name] = g.clauses['start']
+    #                     for k in g.clauses:
+    #                         if k != 'start':
+    #                             assert k not in clauses
+    #                             clauses[k] = g.clauses[k]
+    #             case Rep(c, _):
+    #                 collect_used(c, buf)
+    #             case Seq(cs):
+    #                 for c in cs:
+    #                     collect_used(c, buf)
+    #             case Alt(cs):
+    #                 for c in cs:
+    #                     collect_used(c, buf)
 
-        queue = ['start']
-        while len(queue) > 0:
-            n = queue.pop(0)
-            if n not in clauses:
-                clauses[n] = grammar[n].body
-                used = set()
-                collect_used(grammar[n].body, used)
-                for x in used:
-                    if x not in clauses:
-                        queue.append(x)
+    #     queue = ['start']
+    #     while len(queue) > 0:
+    #         n = queue.pop(0)
+    #         if n not in clauses:
+    #             clauses[n] = grammar[n].body
+    #             used = set()
+    #             collect_used(grammar[n].body, used)
+    #             for x in used:
+    #                 if x not in clauses:
+    #                     queue.append(x)
 
-        return clauses
+    #     return clauses
 
-    def __call__(self, name: str, rules: list[Rule], start: str = 'start') -> Grammar:
+    def __call__(self, name: str, rules: list[Rule], start: str = 'start') -> CFG:
         if start != 'start':
             for rule in rules:
                 if rule.name == 'start':
                     rule.body = Symbol(Ident(start, None))
 
         grammar = self.validate(rules)
-        clauses = self.reduce(grammar)
-
         self._grammar = {}
         self._next_counter = 0
 
-        for symbol in clauses:
+        for symbol in grammar:
             label = f'<{symbol}>'
-            self._grammar[label] = self._convert(clauses[symbol])
+            self._grammar[label] = self._convert(grammar[symbol].body)
             if label == '<start>' and len(self._grammar['<start>']) > 1:
                 # NOTE: ISLa assumes the start rule to be a singleton
                 start = self._fresh_nonterminal()
                 self._grammar[start] = self._grammar['<start>']
                 self._grammar['<start>'] = [start]
 
+        for n in unreachable_nonterminals(self._grammar, '<start>'):
+            del self._grammar[n]
         assert is_valid_grammar(self._grammar)
-        return Grammar(name, clauses, self._grammar)
+        return CFG(name, self._grammar)
 
     def _fresh_nonterminal(self) -> str:
         fresh_name = f'<-{str(self._next_counter)}>'
