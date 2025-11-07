@@ -4,11 +4,12 @@ from textwrap import dedent
 
 from flat.py.type_analysis import *
 
-def analyze(type_code: str, imports: dict[str, str] = {}, aliases: dict[str, Type] = {}) -> Type:
+def analyze(type_code: str, defs: dict[str, Def] = {}) -> Type:
     expr = ast.parse(type_code, mode='eval').body
-    analyzer = TypeAnalyzer(imports, aliases)
-    type_tree = analyzer.visit(expr)
-    return type_tree
+    issuer = Issuer()
+    ctx = Context('<test>', issuer, defs)
+    assert not issuer.has_errors()
+    return analyze_type(expr, ctx)
 
 class TestTypeAnalyzer(unittest.TestCase):
     def test_name_builtin(self):
@@ -16,8 +17,8 @@ class TestTypeAnalyzer(unittest.TestCase):
         self.assertEqual(actual, TypeName('str'))
 
     def test_name_alias(self):
-        actual = analyze("A", aliases={'A': TypeName('str')})
-        self.assertEqual(actual, TypeName('A'))
+        actual = analyze("Word", defs={'Word': TypeDef(TypeName('str'))})
+        self.assertEqual(actual, TypeName('str'))
 
     def test_none_type(self):
         actual = analyze("None")
@@ -28,9 +29,19 @@ class TestTypeAnalyzer(unittest.TestCase):
         expected = TupleType([TypeName('int'), TypeName('str'), TypeName('float')])
         self.assertEqual(actual, expected)
 
+    def test_raw_tuple_type(self):
+        actual = analyze("tuple")
+        expected = TupleType([AnyType()], variant=True)
+        self.assertEqual(actual, expected)
+
     def test_list_type(self):
-        actual = analyze("List[str]", imports={'List': 'list'})
+        actual = analyze("List[str]", defs={'List': TypeConstrDef('list')})
         expected = ListType(TypeName('str'))
+        self.assertEqual(actual, expected)
+
+    def test_raw_list_type(self):
+        actual = analyze("list")
+        expected = ListType(AnyType())
         self.assertEqual(actual, expected)
 
     def test_set_type(self):
@@ -38,20 +49,25 @@ class TestTypeAnalyzer(unittest.TestCase):
         expected = SetType(TypeName('int'))
         self.assertEqual(actual, expected)
 
+    def test_raw_set_type(self):
+        actual = analyze("set")
+        expected = SetType(AnyType())
+        self.assertEqual(actual, expected)
+
     def test_dict_type(self):
-        actual = analyze("dict[str, int]", imports={'Dict': 'dict'})
+        actual = analyze("dict[str, int]")
         expected = DictType(TypeName('str'), TypeName('int'))
         self.assertEqual(actual, expected)
 
     def test_literal_type(self):
-        actual = analyze("Literal[1, 'a']", imports={'Literal': 'typing.Literal'})
+        actual = analyze("Literal[1, 'a']", defs={'Literal': TypeConstrDef('typing.Literal')})
         expected = LiteralType([1, 'a'])
         self.assertEqual(actual, expected)
 
     def test_literal_type_nested(self):
-        actual = analyze("Literal[None, A, 10, Literal[-10]]", imports={'Literal': 'typing.Literal'},
-                         aliases={'A': LiteralType([1, 'a'])})
-        expected = UnionType([LiteralType([None, 10]), TypeName('A'), LiteralType([-10])])
+        actual = analyze("Literal[None, A, 10, Literal[-10]]", 
+                         defs={'Literal': TypeConstrDef('typing.Literal'), 'A': TypeDef(LiteralType([1, 'a']))})
+        expected = LiteralType([None, 1, 'a', 10, -10])
         self.assertEqual(actual, expected)
 
     def test_union_type(self):
@@ -60,10 +76,6 @@ class TestTypeAnalyzer(unittest.TestCase):
         self.assertEqual(actual, expected)
 
     def test_optional_type(self):
-        actual = analyze("Optional[str]", imports={'Optional': 'typing.Optional'})
+        actual = analyze("Optional[str]", defs={'Optional': TypeConstrDef('typing.Optional')})
         expected = UnionType([TypeName('str'), none_type])
         self.assertEqual(actual, expected)
-
-    def test_invalid_type(self):
-        with self.assertRaises(TypeError):
-            analyze("-str")
