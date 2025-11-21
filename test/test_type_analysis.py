@@ -1,6 +1,5 @@
 import ast
 import unittest
-from textwrap import dedent
 
 from flat.py.type_analysis import *
 
@@ -23,6 +22,16 @@ class TestTypeAnalyzer(unittest.TestCase):
     def test_none_type(self):
         actual = analyze("None")
         self.assertEqual(actual, none_type)
+
+    def test_lang_type(self):
+        actual = analyze("flat.py.lang('a b c')")
+        self.assertEqual(actual, AnyType())
+
+    def test_refined_type(self):
+        actual = analyze("refine(str, 'len(_) < 5')", defs={'refine': TypeConstrDef('flat.py.refine')})
+        assert isinstance(actual, RefinedType)
+        self.assertEqual(actual.base, TypeName('str'))
+        self.assertEqual(ast.unparse(actual.predicate), 'lambda _: len(_) < 5')
 
     def test_tuple_type(self):
         actual = analyze("tuple[int, str, float]")

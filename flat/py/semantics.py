@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from flat.py.diagnostics import Issuer, Level, Range, Location, Diagnostic
-from flat.py.ast_helpers import mk_call_runtime, mk_name, get_range
+from flat.py.ast_helpers import mk_call_rt, get_range
 
 class Type:
     """Type at compile time."""
@@ -17,7 +17,7 @@ class Type:
 class AnyType(Type):
     @property
     def ast(self) -> ast.expr:
-        return mk_call_runtime('AnyType')
+        return mk_call_rt('AnyType')
     
 @dataclass
 class TypeName(Type):
@@ -25,7 +25,7 @@ class TypeName(Type):
 
     @property
     def ast(self) -> ast.expr:
-        return mk_name(self.id)
+        return ast.Name(self.id)
 
 @dataclass
 class LangType(Type):
@@ -34,7 +34,7 @@ class LangType(Type):
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_runtime('LangType', mk_name(self.grammar), ast.Constant(self.key))
+        return mk_call_rt('LangType', ast.Name(self.grammar), ast.Constant(self.key))
 
 @dataclass
 class RefinedType(Type):
@@ -43,7 +43,7 @@ class RefinedType(Type):
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_runtime('RefinedType', self.base.ast, self.predicate)
+        return mk_call_rt('RefinedType', self.base.ast, self.predicate)
 
 type LiteralValue = ast._ConstantValue
 
@@ -53,7 +53,7 @@ class LiteralType(Type):
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_runtime('LiteralType', ast.List([ast.Constant(v) for v in self.values], ctx=ast.Load()))
+        return mk_call_rt('LiteralType', ast.List([ast.Constant(v) for v in self.values]))
 
 none_type = LiteralType([None])
 
@@ -63,7 +63,7 @@ class UnionType(Type):
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_runtime('UnionType', ast.List([t.ast for t in self.options], ctx=ast.Load()))
+        return mk_call_rt('UnionType', ast.List([t.ast for t in self.options]))
 
 @dataclass
 class TupleType(Type):
@@ -72,15 +72,23 @@ class TupleType(Type):
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_runtime('TupleType', ast.List([t.ast for t in self.elements], ctx=ast.Load()))
-    
+        return mk_call_rt('TupleType', ast.List([t.ast for t in self.elements]))
+
+@dataclass
+class SeqType(Type):
+    element: Type
+
+    @property
+    def ast(self) -> ast.expr:
+        return mk_call_rt('SeqType', self.element.ast)
+
 @dataclass
 class ListType(Type):
     element: Type
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_runtime('ListType', self.element.ast)
+        return mk_call_rt('ListType', self.element.ast)
     
 @dataclass
 class SetType(Type):
@@ -88,7 +96,7 @@ class SetType(Type):
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_runtime('SetType', self.element.ast)
+        return mk_call_rt('SetType', self.element.ast)
     
 @dataclass
 class DictType(Type):
@@ -97,8 +105,18 @@ class DictType(Type):
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_runtime('DictType', self.key.ast, self.value.ast)
+        return mk_call_rt('DictType', self.key.ast, self.value.ast)
 
+@dataclass
+class ClassType(Type):
+    id: str
+    fields: dict[str, Type]
+
+    @property
+    def ast(self) -> ast.expr:
+        return mk_call_rt('ClassType', ast.Constant(self.id),
+                          ast.Dict([ast.Constant(k) for k in self.fields.keys()],
+                                    [v.ast for v in self.fields.values()]))
 
 class Contract:
     pass
@@ -153,11 +171,16 @@ class UnknownDef(Def):
     pass
 
 
-@dataclass
 class Scope:
     owner: FunDef | None
     _defs: dict[str, Def]
-    _next_fresh: int = 1
+    _next_fresh: int
+
+    def __init__(self, owner: FunDef | None, defs: dict[str, Def] = {}) -> None:
+        self.owner = owner
+        self._defs = {}
+        self._defs.update(defs)
+        self._next_fresh = 1
 
     def __contains__(self, key: str) -> bool:
         return key in self._defs
@@ -241,12 +264,8 @@ class Context:
         assert len(self._local_scopes) > 0, "No local level to pop"
         self._local_scopes.pop()
 
-    def report(self, level: Level, msg: str, at: Range | ast.AST) -> None:
-        range = at if isinstance(at, Range) else get_range(at)
-        self.issuer.report(Diagnostic(level, msg, Location(self.file_path, range)))
-    
-    def error(self, msg: str, at: Range | ast.AST) -> None:
-        return self.report(Level.ERROR, msg, at)
+    def issue(self, diagnostic: Diagnostic) -> None:
+        self.issuer.issue(diagnostic)
 
-    def warn(self, msg: str, at: Range | ast.AST) -> None:
-        return self.report(Level.WARN, msg, at)
+    def get_loc(self, node: ast.AST) -> Location:
+        return Location(self.file_path, get_range(node))

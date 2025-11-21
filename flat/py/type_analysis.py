@@ -1,5 +1,6 @@
 import ast
 
+from flat.py.diagnostics import *
 from flat.py.semantics import *
 from flat.py.ast_helpers import *
 
@@ -23,20 +24,21 @@ class TypeAnalyzer(ast.NodeVisitor):
         if node.value is None:
             return none_type
         else:
-            self.ctx.error("Invalid type: try using typing.Literal[...] instead?", node)
+            self.ctx.issue(InvalidType(self.ctx.get_loc(node)))
             return AnyType()
     
     def visit_Name(self, node: ast.Name) -> Type:
         match self.ctx.lookup(node.id):
-            case None if node.id in b_type_items:
-                return TypeName(node.id)
-            case None if node.id in b_constr_items:
-                return self._check_type_call_nil(node.id, node)
             case None:
-                self.ctx.error(f"Unknown type '{node.id}'", node)
-                return AnyType()
+                if node.id in b_type_items:
+                    return TypeName(node.id)
+                elif node.id in b_constr_items:
+                    return self._check_type_call_nil(node.id, node)
+                else:
+                    self.ctx.issue(UndefinedName(node.id, self.ctx.get_loc(node)))
+                    return AnyType()
             case VarDef() | FunDef():
-                self.ctx.error(f"'{node.id}' is not a type", node)
+                self.ctx.issue(InvalidType(self.ctx.get_loc(node)))
                 return AnyType()
             case TypeDef(t):
                 return t
@@ -56,14 +58,14 @@ class TypeAnalyzer(ast.NodeVisitor):
             case 'dict':
                 return DictType(AnyType(), AnyType())
             case 'typing.Literal':
-                self.ctx.error("typing.Literal[...] must have at least one parameter", fun_node)
+                self.ctx.issue(ArityMismatch(fun_id, 'at least 1', 0, self.ctx.get_loc(fun_node)))
                 return AnyType()
             case 'typing.Union':
                 # NOTE: mypy interprets this as a bottom type
-                self.ctx.error("typing.Union[...] must have at least two arguments", fun_node)
+                self.ctx.issue(ArityMismatch(fun_id, 'at least 2', 0, self.ctx.get_loc(fun_node)))
                 return AnyType()
             case 'typing.Optional':
-                self.ctx.error("typing.Optional[...] must have exactly one argument", fun_node)
+                self.ctx.issue(ArityMismatch(fun_id, '1', 0, self.ctx.get_loc(fun_node)))
                 return AnyType()
             case _:
                 raise NameError(f"Unknown type constructor '{fun_id}'.")
@@ -73,28 +75,34 @@ class TypeAnalyzer(ast.NodeVisitor):
             case ast.Name(f):
                 match self.ctx.lookup(f):
                     case None:
-                        self.ctx.error(f"Unknown type constructor '{f}'", node)
+                        self.ctx.issue(UndefinedName(f, self.ctx.get_loc(node.func)))
                         return AnyType()
                     case TypeConstrDef(id):
-                        return self._check_type_call_paren(id, node.func, node.args)
+                        return self._check_type_call_paren(id, node.args, self.ctx.get_loc(node))
 
-        self.ctx.error("Invalid type", node)
+        self.ctx.issue(InvalidType(self.ctx.get_loc(node)))
         return AnyType()
     
-    def _check_type_call_paren(self, fun_id: str, fun_node: ast.expr, args: list[ast.expr]) -> Type:
-        raise NotImplementedError
-
-    def _check_lang(self, grammar: ast.expr, tag: ast.expr) -> Type:
-        raise NotImplementedError
-
-    def _check_refine(self, base: ast.expr, predicate: ast.expr) -> Type:
-        t = self.visit(base)
-        match predicate:
-            case ast.Constant(str() as code):
-                p = mk_lambda(['_'], ast.parse(code, mode='eval').body)
-            case p:
-                pass
-        return RefinedType(t, p)
+    def _check_type_call_paren(self, fun_id: str, args: list[ast.expr], loc: Location) -> Type:
+        match fun_id, args:
+            case 'flat.py.lang', [arg]:
+                return AnyType()
+            case 'flat.py.lang', _:
+                self.ctx.issue(ArityMismatch('flat.py.lang', '1', len(args), loc))
+                return AnyType()
+            case 'flat.py.refine', [arg_t, arg_p]:
+                t = self.visit(arg_t)
+                match arg_p:
+                    case ast.Constant(str() as code):
+                        p = mk_lambda(['_'], ast.parse(code, mode='eval').body)
+                    case p:
+                        pass
+                return RefinedType(t, p)
+            case 'flat.py.refine', _:
+                self.ctx.issue(ArityMismatch('flat.py.refine', '2', len(args), loc))
+                return AnyType()
+            case _:
+                raise NameError(f"Unknown type constructor '{fun_id}'.")
     
     def visit_Subscript(self, node: ast.Subscript) -> Type:
         match node.value:
@@ -102,38 +110,36 @@ class TypeAnalyzer(ast.NodeVisitor):
                 match self.ctx.lookup(f):
                     case None:
                         if f in b_constr_items:
-                            return self._check_type_call_bracket(f, node.value, get_type_args(node))
+                            return self._check_type_call_bracket(f, get_type_args(node), self.ctx.get_loc(node))
                         else:
-                            self.ctx.error(f"Name '{f}' is not defined", node.value)
+                            self.ctx.issue(UndefinedName(f, self.ctx.get_loc(node.value)))
                             return AnyType()
                     case TypeConstrDef(id):
-                        return self._check_type_call_bracket(id, node.value, get_type_args(node))
-                    case Type():
-                        self.ctx.error(f"Type '{f}' expects no type arguments", node.value)
-                        return AnyType()
+                        return self._check_type_call_bracket(id, get_type_args(node), self.ctx.get_loc(node))
 
-        self.ctx.error("Invalid type", node)
+        self.ctx.issue(InvalidType(self.ctx.get_loc(node)))
         return AnyType()
     
-    def _check_type_call_bracket(self, fun_id: str, fun_node: ast.expr, args: list[ast.expr]) -> Type:
+    def _check_type_call_bracket(self, fun_id: str, args: list[ast.expr], loc: Location) -> Type:
         match fun_id, args:
+            case 'tuple', [*args, ast.Constant(v)] if v is ...:
+                return TupleType([self.visit(arg) for arg in args], variant=True)
             case 'tuple', _:
-                # TODO: variant
                 return TupleType([self.visit(arg) for arg in args])
             case 'list', [arg]:
                 return ListType(self.visit(arg))
             case 'list', _:
-                self.ctx.error("list[...] must have exactly 1 argument", fun_node)
+                self.ctx.issue(ArityMismatch('list', '1', len(args), loc))
                 return AnyType()
             case 'set', [arg]:
                 return SetType(self.visit(arg))
             case 'set', _:
-                self.ctx.error("set[...] must have exactly 1 argument", fun_node)
+                self.ctx.issue(ArityMismatch('set', '1', len(args), loc))
                 return AnyType()
             case 'dict', [key_arg, value_arg]:
                 return DictType(self.visit(key_arg), self.visit(value_arg))
             case 'dict', _:
-                self.ctx.error("dict[...] must have exactly 2 arguments", fun_node)
+                self.ctx.issue(ArityMismatch('dict', '2', len(args), loc))
                 return AnyType()
             case 'typing.Literal', _:
                 return self._check_literal_type(args)
@@ -142,7 +148,7 @@ class TypeAnalyzer(ast.NodeVisitor):
             case 'typing.Optional', [arg]:
                 return UnionType([self.visit(arg), none_type])
             case 'typing.Optional', _:  
-                self.ctx.error("typing.Optional[...] must have exactly 1 argument", fun_node)
+                self.ctx.issue(ArityMismatch('typing.Optional', '1', len(args), loc))
                 return AnyType()
             case _:
                 raise NameError(f"Unknown type constructor '{fun_id}'.")
@@ -160,19 +166,18 @@ class TypeAnalyzer(ast.NodeVisitor):
                         case LiteralType(vs):
                             values += vs
                         case _:
-                            self.ctx.error(f"Parameter of typing.Literal is invalid", arg)
+                            self.ctx.issue(InvalidLiteral(self.ctx.get_loc(arg)))
 
         return LiteralType(values)
 
     def visit_BinOp(self, node: ast.BinOp) -> Type:
         if isinstance(node.op, ast.BitOr):
             args = get_operands(node, ast.BitOr)
-            return self._check_type_call_bracket('typing.Union', node, args)
-            
-        self.ctx.error("Invalid type", node)
-        return AnyType()
+            return self._check_type_call_bracket('typing.Union', args, self.ctx.get_loc(node))
+        else:
+            self.ctx.issue(InvalidType(self.ctx.get_loc(node)))
+            return AnyType()
 
     def generic_visit(self, node: ast.AST) -> Type:
-        assert isinstance(node, ast.expr)
-        self.ctx.error("Invalid type", node)
+        self.ctx.issue(InvalidType(self.ctx.get_loc(node)))
         return AnyType()

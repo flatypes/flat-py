@@ -1,6 +1,6 @@
 import ast
 
-from flat.py.diagnostics import Issuer
+from flat.py.diagnostics import *
 from flat.py.semantics import *
 from flat.py.type_analysis import analyze_type
 from flat.py.ast_helpers import *
@@ -30,7 +30,11 @@ class Instrumentor(ast.NodeTransformer):
         super().__init__()
         self.ctx = ctx
 
-    # Function
+    # Class & Function Definitions
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
+        raise NotImplementedError
+    
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
         # Resolve signature
         args = self._resolve_arguments(node.args)
@@ -44,23 +48,17 @@ class Instrumentor(ast.NodeTransformer):
         for x, arg in args:
             match arg.kind:
                 case 'arg':
-                    body += self._check_type(x, arg.typ)
+                    self._check_type(ast.Name(x), arg.typ, body)
                 case 'vararg':
-                    y = self.ctx.fresh()
-                    checks = self._check_type(y, arg.typ)
-                    if len(checks) > 0:
-                        body += [ast.For(mk_name(y), mk_name(x), checks, [])]
+                    self._check_type(ast.Name(x), SeqType(arg.typ), body)
                 case 'kwarg':
-                    y = self.ctx.fresh()
-                    checks = self._check_type(y, arg.typ)
-                    if len(checks) > 0:
-                        body += [ast.For(mk_name(y), mk_call_method(mk_name(x), 'values'), checks, [])]
+                    self._check_type(ast.Attribute(ast.Name(x), 'values'), SeqType(arg.typ), body)
         
         # Check pre-conditions
         for contract in contracts:
             match contract:
                 case PreCond(p):
-                    body += [mk_rt('check_pre', ast.Call(p, [mk_name(x) for x in arg_ids], []))]
+                    body += [ast.Expr(mk_call_rt('check_pre', mk_call(p, *(ast.Name(x) for x in arg_ids))))]
 
         # Set up function context and check body
         self.ctx.push(fun_sig, defs=dict(args))
@@ -97,14 +95,20 @@ class Instrumentor(ast.NodeTransformer):
     def _resolve_decorator(self, node: ast.expr) -> list[Contract]:
         raise NotImplementedError
 
-    def _check_type(self, name: str, typ: Type) -> list[ast.stmt]:
+    def _check_type(self, value: str | ast.expr, typ: Type, body: list[ast.stmt]) -> None:
         match typ:
             case AnyType():
-                return []
+                pass
             case _:
-                return [mk_rt('check_type', mk_name(name), typ.ast)]
-    
-    # Return
+                if isinstance(value, str):
+                    value = ast.Name(value)
+                if not pure(value):
+                    x = self.ctx.fresh()
+                    body.append(mk_assign(x, value))
+                    value = ast.Name(x)
+                body.append(ast.Expr(mk_call_rt('check_type', value, typ.ast)))
+
+    # Return Statements
     def visit_Return(self, node: ast.Return) -> list[ast.stmt]:
         fun = self.ctx.owner()
         assert fun is not None, "'return' outside function"
@@ -113,30 +117,30 @@ class Instrumentor(ast.NodeTransformer):
         body: list[ast.stmt] = []
         return_value = node.value if node.value else ast.Constant(None)
         body += [mk_assign('__return__', return_value)]
-        body += self._check_type('__return__', fun.return_type) # Check return type
+        self._check_type(ast.Name('__return__'), fun.return_type, body) # Check return type
         
         # Check post-conditions
         xs = fun.args + ['__return__']
         for contract in fun.contracts:
             match contract:
                 case PostCond(p): # Assume: input arguments are immutable
-                    body += [mk_rt('check_post', ast.Call(p, [mk_name(x) for x in xs], []))]
+                    body += [ast.Expr(mk_call_rt('check_post', mk_call(p, *(ast.Name(x) for x in xs))))]
         
         # Done
-        body += [ast.Return(mk_name('__return__'))]
+        body += [ast.Return(ast.Name('__return__'))]
         return body
     
-    # Import
+    # Import Statements
     def visit_ImportFrom(self, node: ast.ImportFrom) -> ast.ImportFrom:
         known = lib[node.module] if node.module in lib else {}
         for alias in node.names:
-            name = alias.asname or alias.name
-            match self.ctx.get(name):
+            x = alias.asname or alias.name
+            match self.ctx.get(x):
                 case None:
                     d = known.get(alias.name, UnknownDef())
-                    self.ctx[name] = d
+                    self.ctx[x] = d
                 case _:
-                    self.ctx.error(f"Name '{name}' is already defined", alias)
+                    self.ctx.issue(RedefinedName(x, self.ctx.get_loc(alias)))
         
         return node
     
@@ -154,9 +158,9 @@ class Instrumentor(ast.NodeTransformer):
     
     def visit_Nonlocal(self, node: ast.Nonlocal) -> ast.Nonlocal:
         for id in node.names:
-            match self.ctx.lookup_global(id):
+            match self.ctx.lookup_nonlocal(id):
                 case None:
-                    self.ctx.error(f"No binding for nonlocal '{id}' found", node)
+                    self.ctx.issue(UndefinedNonlocal(id, self.ctx.get_loc(node)))
                 case d:
                     self.ctx[id] = d
 
@@ -175,56 +179,81 @@ class Instrumentor(ast.NodeTransformer):
         match self.ctx.get(target.id):
             case None:
                 self.ctx[target.id] = d
-            case _: 
-                self.ctx.error(f"Name '{target.id}' is already defined", target)
+            case _:
+                self.ctx.issue(RedefinedName(target.id, self.ctx.get_loc(target)))
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> list[ast.stmt]:
+        body: list[ast.stmt] = [node]
         match node.target, node.annotation:
             case ast.Name(), ast.Name('type') if node.value: # type alias
                 self._check_type_alias(node.target, node.value)
-                return [node]
-            case ast.Name(x), annot: # variable declaration
-                body: list[ast.stmt] = [node]
-                d = VarDef(analyze_type(annot, self.ctx))
-                if node.value:
-                    body += self._check_type(x, d.typ)
-                match self.ctx.get(x):
-                    case None:
-                        self.ctx[x] = d
-                    case _:
-                        self.ctx.error(f"Name '{x}' is already defined", node)
                 return body
-            case _:  # do not support other targets for now
-                self.ctx.warn("Type annotation is not supported for this left-value", node.target)
-                return [node]
+            case ast.Name(x), a: # variable declaration
+                d = VarDef(analyze_type(a, self.ctx))
+                if x not in self.ctx:
+                    self.ctx[x] = d
+                    if node.value: # assignment
+                        self._check_type(ast.Name(x), d.typ, body)
+                else:
+                    self.ctx.issue(RedefinedName(x, self.ctx.get_loc(node.target)))
+            case e, a: # ignore annotation and regard it as assignment
+                self.ctx.issue(IgnoredAnnot(self.ctx.get_loc(node.annotation)))
+                if node.value:
+                    self._check_left_value(e, body)
+        return body
+
+    def _check_left_value(self, value: ast.expr, body: list[ast.stmt]) -> Type | None:
+        match value:
+            case ast.Name(x):
+                match self.ctx.lookup(x):
+                    case None:
+                        self.ctx.issue(UndefinedName(x, self.ctx.get_loc(value)))
+                        return None
+                    case VarDef(tx):
+                        self._check_type(ast.Name(x), tx, body)
+                        return tx
+                    case _:
+                        self.ctx.issue(NotAssignable(x, self.ctx.get_loc(value)))
+                        return None
+            case ast.Attribute(e, x):
+                t = self._check_left_value(e, body)
+                if t:
+                    match t:
+                        case ClassType(_, fs) if x in fs:
+                            self._check_type(value, fs[x], body)
+                            return fs[x]
+                return None
+            case ast.Subscript(e, ek):
+                t = self._check_left_value(e, body)
+                if t:
+                    match t:
+                        case ListType(te):
+                            ts = t if isinstance(ek, ast.Slice) else te
+                            self._check_type(value, ts, body)
+                            return ts
+                        case DictType(tk, tv):
+                            self._check_type(ek, tk, body)
+                            self._check_type(value, tv, body)
+                            return tv
+                return None
+            case _:
+                return None
 
     def visit_Assign(self, node: ast.Assign) -> list[ast.stmt]:
-        xs = [x for e in node.targets for x in get_left_vars(e)]
-        # Declare variables that are new
-        for x in xs:
-            if self.ctx.get(x) is None:
-                self.ctx[x] = VarDef(AnyType())
-        # Type check
         body: list[ast.stmt] = [node]
-        for x in xs:
-            match self.ctx[x]:
-                case VarDef(typ):
-                    body += self._check_type(x, typ)
-                case _:
-                    self.ctx.error(f"Name '{x}' is not a variable", node)
-        
+        for target in node.targets:
+            es = get_left_values(target)
+            # Declare variables that are new
+            for e in es:
+                match e:
+                    case ast.Name(x) if x not in self.ctx:
+                        self.ctx[x] = VarDef(AnyType())
+            # Check each left value
+            for e in es:
+                self._check_left_value(e, body)
         return body
     
     def visit_AugAssign(self, node: ast.AugAssign) -> list[ast.stmt]:
         body: list[ast.stmt] = [node]
-        match node.target:
-            case ast.Name(x):
-                match self.ctx.lookup(x):
-                    case None:
-                        self.ctx.error(f"Name '{x}' is not defined", node.target)
-                    case VarDef(typ):
-                        body += self._check_type(x, typ)
-                    case _:
-                        self.ctx.error(f"Name '{x}' is not a variable", node.target)
-
+        self._check_left_value(node.target, body)
         return body

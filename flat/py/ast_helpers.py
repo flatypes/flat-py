@@ -4,8 +4,8 @@ from flat.py.diagnostics import Position, Range
 
 # Factory methods
 
-def mk_name(name: str) -> ast.Name:
-    return ast.Name(name, ctx=ast.Load())
+def mk_assign(target: str, value: ast.expr) -> ast.stmt:
+    return ast.Assign([ast.Name(target, ctx=ast.Store())], value)
 
 def mk_lambda(args: list[str], body: ast.expr) -> ast.Lambda:
     arguments = ast.arguments([], [ast.arg(x) for x in args], None, [], [], None, [])
@@ -14,28 +14,10 @@ def mk_lambda(args: list[str], body: ast.expr) -> ast.Lambda:
 def mk_call(func: ast.expr, *args: ast.expr) -> ast.expr:
     return ast.Call(func, list(args), [])
 
-def mk_call_method(receiver: ast.expr, method: str, *args: ast.expr) -> ast.expr:
-    return ast.Call(ast.Attribute(receiver, method), list(args), [])
+def mk_call_rt(name: str, *args: ast.expr) -> ast.expr:
+    return mk_call(ast.Attribute(ast.Name(f'rt'), name), *args)
 
-def mk_assign(target: str, value: ast.expr) -> ast.stmt:
-    return ast.Assign([mk_name(target)], value)
-
-def mk_call_runtime(name: str, *args: ast.expr) -> ast.expr:
-    return mk_call_method(mk_name(f'runtime'), name, *args)
-
-def mk_rt(name: str, *args: ast.expr) -> ast.stmt:
-    return ast.Expr(ast.Call(ast.Name(name, ast.Load()), list(args), []))
-
-def get_left_vars(left_value: ast.expr) -> list[str]:
-    match left_value:
-        case ast.Name(x):
-            return [x]
-        case ast.Tuple(es):
-            return [x for e in es for x in get_left_vars(e)]
-        case _:
-            return []
-
-# Arguments
+# Extractors
 
 def get_type_args(subscript: ast.Subscript) -> list[ast.expr]:
     match subscript.slice:
@@ -43,6 +25,34 @@ def get_type_args(subscript: ast.Subscript) -> list[ast.expr]:
             return es
         case e:
             return [e]
+
+def get_left_values(target: ast.expr) -> list[ast.expr]:
+    extractor = LeftValueExtractor()
+    extractor.visit(target)
+    return extractor.left_values
+
+def get_operands(expr: ast.expr, op: type[ast.operator]) -> list[ast.expr]:
+    """Gets the operands of a binary operation AST."""
+    match expr:
+        case ast.BinOp(left, o, right) if isinstance(o, op):
+            return get_operands(left, op) + get_operands(right, op)
+        case _:
+            return [expr]
+
+class LeftValueExtractor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.left_values: list[ast.expr] = []
+
+    def visit_Name(self, node: ast.Name) -> None:
+        self.left_values.append(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        self.left_values.append(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        self.left_values.append(node)
+
 
 def check_args(call: ast.Call, required: list[str], optional: list[tuple[str, ast.expr]] = []) -> list[ast.expr]:
     args: dict[str, ast.expr] = {}
@@ -70,13 +80,6 @@ def check_args(call: ast.Call, required: list[str], optional: list[tuple[str, as
 
 # Binary operations
 
-def get_operands(expr: ast.expr, op: type[ast.operator]) -> list[ast.expr]:
-    """Gets the operands of a binary operation AST."""
-    match expr:
-        case ast.BinOp(left, o, right) if isinstance(o, op):
-            return get_operands(left, op) + get_operands(right, op)
-        case _:
-            return [expr]
 
 # Range
 
@@ -90,3 +93,21 @@ def get_range(node: ast.AST) -> Range:
         return Range(start, end)
 
     raise ValueError("AST node does not have position information.")
+
+def pure(expr: ast.expr) -> bool:
+    """Tests whether an expression is pure. This implementation is conservative (sound but incomplete)."""
+    match expr:
+        case ast.Constant() | ast.Name():
+            return True
+        case ast.UnaryOp(_, e):
+            return pure(e)
+        case ast.BinOp(e1, _, e2):
+            return pure(e1) and pure(e2)
+        case ast.Attribute(e, _):
+            return pure(e)
+        case ast.Subscript(e, ei):
+            return pure(e) and pure(ei)
+        case ast.Slice(e1, e2, e3):
+            return (e1 is None or pure(e1)) and (e2 is None or pure(e2)) and (e3 is None or pure(e3))
+        case _:
+            return False
