@@ -3,6 +3,8 @@ import ast
 from flat.py.diagnostics import *
 from flat.py.semantics import *
 from flat.py.ast_helpers import *
+from flat.lang.parsing import Format, supported_formats, parse
+from flat.lang.translation import normalize
 
 b_type_items: set[str] = {'str', 'bool', 'int', 'float', 'complex', 'bytes'}
 type_items: set[str] = b_type_items | {'typing.Any'}
@@ -78,14 +80,24 @@ class TypeAnalyzer(ast.NodeVisitor):
                         self.ctx.issue(UndefinedName(f, self.ctx.get_loc(node.func)))
                         return AnyType()
                     case TypeConstrDef(id):
-                        return self._check_type_call_paren(id, node.args, self.ctx.get_loc(node))
+                        return self._check_type_call_paren(id, node.args, node.keywords, self.ctx.get_loc(node))
 
         self.ctx.issue(InvalidType(self.ctx.get_loc(node)))
         return AnyType()
     
-    def _check_type_call_paren(self, fun_id: str, args: list[ast.expr], loc: Location) -> Type:
+    def _check_type_call_paren(self, fun_id: str, args: list[ast.expr], keywords: list[ast.keyword],
+                               loc: Location) -> Type:
         match fun_id, args:
             case 'flat.py.lang', [arg]:
+                match arg:
+                    case ast.Constant(str() as s):
+                        format = self._check_lang_keywords(keywords, loc)
+                        lang = parse(s, format=format, file_path=loc.file_path)
+                        norm_lang = normalize(lang, self.ctx.issuer, self.ctx.lang_finder)
+                        return LangType(0)
+                    case _:
+                        self.ctx.issue(InvalidType(self.ctx.get_loc(arg)))
+                        return AnyType()
                 return AnyType()
             case 'flat.py.lang', _:
                 self.ctx.issue(ArityMismatch('flat.py.lang', '1', len(args), loc))
@@ -104,6 +116,19 @@ class TypeAnalyzer(ast.NodeVisitor):
             case _:
                 raise NameError(f"Unknown type constructor '{fun_id}'.")
     
+    def _check_lang_keywords(self, keywords: list[ast.keyword], loc: Location) -> Format:
+        format: Format | None = None
+        for kw in keywords:
+            if kw.arg == 'format':
+                match kw.value:
+                    case ast.Constant(str() as s) if s in supported_formats:
+                        format = s # type: ignore
+                    case _:
+                        self.ctx.issue(InvalidFormat(self.ctx.get_loc(kw.value)))
+                        format = 'ebnf'
+
+        return format or 'ebnf'
+
     def visit_Subscript(self, node: ast.Subscript) -> Type:
         match node.value:
             case ast.Name(f):

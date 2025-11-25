@@ -24,8 +24,12 @@ class TestTypeAnalyzer(unittest.TestCase):
         self.assertEqual(actual, none_type)
 
     def test_lang_type(self):
-        actual = analyze("flat.py.lang('a b c')")
-        self.assertEqual(actual, AnyType())
+        actual = analyze("""lang('start: A; A: "a";')""", defs={'lang': TypeConstrDef('flat.py.lang')})
+        self.assertEqual(actual, LangType(0))
+
+    def test_lang_regex(self):
+        actual = analyze("""lang('a', format='regex')""", defs={'lang': TypeConstrDef('flat.py.lang')})
+        self.assertEqual(actual, LangType(0))
 
     def test_refined_type(self):
         actual = analyze("refine(str, 'len(_) < 5')", defs={'refine': TypeConstrDef('flat.py.refine')})

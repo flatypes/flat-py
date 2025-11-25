@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
+from typing import Iterable
 
 @dataclass
 class Position:
@@ -38,8 +39,8 @@ class Issuer:
     def has_errors(self) -> bool:
         return any(d.level == Level.ERROR for d in self._diagnostics)
     
-    def get_errors(self) -> list[Diagnostic]:
-        return [d for d in self._diagnostics if d.level == Level.ERROR]
+    def get_diagnostics(self) -> Iterable[Diagnostic]:
+        return self._diagnostics
 
     def pretty(self) -> str:
         lines = []
@@ -50,3 +51,19 @@ class Issuer:
         return "\n".join(lines)
 
 # Diagnostic subclasses
+
+class EmptyRange(Diagnostic):
+    def __init__(self, lower: str, upper: str, loc: Location) -> None:
+        super().__init__(level=Level.WARN, loc=loc, msg=f"Empty range: {lower} > {upper}")
+
+class RedefinedRule(Diagnostic):
+    def __init__(self, id: str, loc: Location) -> None:
+        super().__init__(level=Level.ERROR, loc=loc, msg=f"Redefined rule: {id}")
+
+class UndefinedRule(Diagnostic):
+    def __init__(self, id: str, loc: Location) -> None:
+        super().__init__(level=Level.ERROR, loc=loc, msg=f"Undefined rule: {id}")
+
+class NoStartRule(Diagnostic):
+    def __init__(self, lang_id: str, loc: Location) -> None:
+        super().__init__(level=Level.ERROR, loc=loc, msg=f"No 'start' rule in '{lang_id}'")

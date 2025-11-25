@@ -1,10 +1,10 @@
 from abc import abstractmethod
-import string
+from typing import Literal, get_args
+import string, re
 from parsy import Parser, Result, line_info_at, string as expect, seq, alt, forward_declaration, ParseError
-import re
 
-from flat.grammar.ast import *
-from flat.grammar.diagnostics import Position, Range, Location
+from flat.lang.ast import *
+from flat.lang.diagnostics import Position, Range, Location
 
 ESCAPE_CHARS = {
     '\\': '\\',
@@ -157,7 +157,7 @@ class ExprParser:
         parser.become(union)
         return parser
 
-def parse_RE(source: str, file_path: str = '<unknown>') -> RE:
+def parse_RE(source: str, file_path: str = '<unknown>') -> RL:
     parser = REParser(file_path).expr()
     return parser.parse(source)
 
@@ -186,9 +186,9 @@ class CFGParser(ExprParser):
         self.angled = angled
 
     def symbol(self) -> Parser:
-        symbol = self.set_loc(self.regex(r'[A-Za-z0-9_-]+').map(Symbol))
+        symbol = self.set_loc(self.regex(r'[A-Za-z0-9_-]+').map(Name))
         if self.angled:
-            symbol |= self.set_loc(self.regex(r'<[A-Za-z0-9_-]+>').map(lambda s: Symbol(s[1:-1])))
+            symbol |= self.set_loc(self.regex(r'<[A-Za-z0-9_-]+>').map(lambda s: Name(s[1:-1])))
         return symbol
 
     def atomic(self) -> Parser:
@@ -200,3 +200,14 @@ class CFGParser(ExprParser):
     def cfg(self) -> Parser:
         rule = self.set_loc(seq(self.symbol(), self.literal(':') >> self.expr() << self.literal(';')).combine(Rule))
         return rule.at_least(1) << self.literal('')
+
+type Format = Literal['ebnf', 'regex']
+
+supported_formats: frozenset[Format] = frozenset(get_args(Format.__value__))
+
+def parse(source: str, /, format: Format = 'ebnf', file_path: str = '<unknown>') -> Lang:
+    match format:
+        case 'ebnf':
+            return parse_CFG(source, file_path)
+        case 'regex':
+            return parse_RE(source, file_path)

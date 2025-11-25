@@ -1,6 +1,6 @@
 import ast
 
-from flat.py.diagnostics import Position, Range
+from flat.lang.diagnostics import Position, Range
 
 # Factory methods
 
@@ -53,30 +53,29 @@ class LeftValueExtractor(ast.NodeVisitor):
     def visit_Subscript(self, node: ast.Subscript) -> None:
         self.left_values.append(node)
 
-
-def check_args(call: ast.Call, required: list[str], optional: list[tuple[str, ast.expr]] = []) -> list[ast.expr]:
-    args: dict[str, ast.expr] = {}
-    names = required + [x for x, _ in optional]
-    for e, x in zip(call.args, names):
-        args[x] = e
-    for kw in call.keywords:
-        if kw.arg in names:
-            if kw.arg not in args:
-                args[kw.arg] = kw.value
-            else:
-                raise TypeError(f"Argument '{kw.arg}' repeated.")
-        else:
-            raise TypeError(f"Unexpected keyword argument '{kw.arg}'.")
+# def check_args(call: ast.Call, required: list[str], optional: list[tuple[str, ast.expr]] = []) -> list[ast.expr]:
+#     args: dict[str, ast.expr] = {}
+#     names = required + [x for x, _ in optional]
+#     for e, x in zip(call.args, names):
+#         args[x] = e
+#     for kw in call.keywords:
+#         if kw.arg in names:
+#             if kw.arg not in args:
+#                 args[kw.arg] = kw.value
+#             else:
+#                 raise TypeError(f"Argument '{kw.arg}' repeated.")
+#         else:
+#             raise TypeError(f"Unexpected keyword argument '{kw.arg}'.")
     
-    missing = set(required) - args.keys()
-    if len(missing) > 0:
-        raise TypeError(f"Missing required arguments: {', '.join(missing)}.")
+#     missing = set(required) - args.keys()
+#     if len(missing) > 0:
+#         raise TypeError(f"Missing required arguments: {', '.join(missing)}.")
 
-    for x, default in optional:
-        if x not in args:
-            args[x] = default
+#     for x, default in optional:
+#         if x not in args:
+#             args[x] = default
 
-    return [args[x] for x in names]
+#     return [args[x] for x in names]
 
 # Binary operations
 

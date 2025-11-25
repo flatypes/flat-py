@@ -3,9 +3,10 @@ from textwrap import dedent
 from typing import cast
 import unittest
 
-from flat.py.diagnostics import *
+from flat.lang.diagnostics import Issuer
 from flat.py.semantics import Context
 from flat.py.instrumentation import Instrumentor
+from flat.py.diagnostics import *
 
 class TestInstrumentor(unittest.TestCase):
     def process(self, code: str) -> ast.Module:
@@ -251,11 +252,9 @@ class TestInstrumentorNegative(unittest.TestCase):
         instrumentor = Instrumentor(ctx)
         input = ast.parse(dedent(code), filename='<test>')
         instrumentor.visit(input)
-        errors = issuer.get_errors()
-        if len(errors) == 1:
-            return errors[0]
-        else:
-            self.fail(f"Expected one error, got {len(errors)}:\n{issuer.pretty()}")
+        errors = issuer.get_diagnostics()
+        self.assertEqual(len(errors), 1)
+        return errors[0]
     
     def test_redefine(self):
         diagnostic = self.process(

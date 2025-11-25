@@ -2,8 +2,8 @@ import unittest
 
 from parsy import Parser, ParseError
 
-from flat.grammar.ast import *
-from flat.grammar.parsers import ExprParser, parse_RE, parse_CFG
+from flat.lang.ast import *
+from flat.lang.parsing import ExprParser, parse
 
 class TestParseCharSeq(unittest.TestCase):
     class TestParser(ExprParser):
@@ -17,7 +17,7 @@ class TestParseCharSeq(unittest.TestCase):
         self.parser = self.TestParser().atomic()
 
     def test_ordinary(self):
-        result = self.parser.parse(r'a')
+        result = self.parser.parse('a')
         self.assertEqual(result, 'a')
 
     def test_escape_backslash(self):
@@ -76,114 +76,115 @@ class TestParseCharSeq(unittest.TestCase):
         result = self.parser.parse(r'\xFFFF')
         self.assertEqual(result, chr(0xFF) + 'FF')
 
-class TestParseRE(unittest.TestCase):
+class TestParseRegex(unittest.TestCase):
     def test_union(self):
-        grammar = parse_RE(r'a|b|c')
+        grammar = parse(r'a|b|c', format='regex')
         self.assertEqual(grammar, Union([Lit('a'), Lit('b'), Lit('c')]))
 
     def test_concat(self):
-        grammar = parse_RE(r'abc')
+        grammar = parse(r'abc', format='regex')
         self.assertEqual(grammar, Concat([Lit('a'), Lit('b'), Lit('c')]))
 
     def test_star(self):
-        grammar = parse_RE(r'a*')
+        grammar = parse(r'a*', format='regex')
         self.assertEqual(grammar, Star(Lit('a')))
 
     def test_plus(self):
-        grammar = parse_RE(r'a+')
+        grammar = parse(r'a+', format='regex')
         self.assertEqual(grammar, Plus(Lit('a')))
 
     def test_optional(self):
-        grammar = parse_RE(r'a?')
+        grammar = parse(r'a?', format='regex')
         self.assertEqual(grammar, Optional(Lit('a')))
 
     def test_power(self):
-        grammar = parse_RE(r'a{3}')
+        grammar = parse(r'a{3}', format='regex')
         self.assertEqual(grammar, Power(Lit('a'), 3))
 
     def test_loop(self):
-        grammar = parse_RE(r'a{2,5}')
+        grammar = parse(r'a{2,5}', format='regex')
         self.assertEqual(grammar, Loop(Lit('a'), NatRange(2, 5)))
 
     def test_loop_unbounded(self):
-        grammar = parse_RE(r'a{,}')
+        grammar = parse(r'a{,}', format='regex')
         self.assertEqual(grammar, Loop(Lit('a'), NatRange(0, None)))
 
     def test_char_class_inclusive(self):
-        grammar = parse_RE(r'[a-cx-z]')
+        grammar = parse(r'[a-cx-z]', format='regex')
         self.assertEqual(grammar, CharClass('inclusive', [CharRange('a', 'c'), CharRange('x', 'z')]))
 
     def test_char_class_exclusive(self):
-        grammar = parse_RE(r'[^.+\-|]')
+        grammar = parse(r'[^.+\-|]', format='regex')
         self.assertEqual(grammar, CharClass('exclusive', ['.', '+', '-', '|']))
 
     def test_char_class_escape(self):
-        grammar = parse_RE(r'[\'\x41-\x5A\[\-\]]')
+        grammar = parse(r'[\'\x41-\x5A\[\-\]]', format='regex')
         self.assertEqual(grammar, CharClass('inclusive', ["'", CharRange('A', 'Z'), '[', '-', ']']))
 
     def test_invalid_char_class(self):
         with self.assertRaises(ParseError):
-            parse_RE(r'[ab-]')
+            parse(r'[ab-]', format='regex')
 
     def test_nested_expr(self):
-        grammar = parse_RE(r'(ab?|c(d|e)f)*')
+        grammar = parse(r'(ab?|c(d|e)[^f])*', format='regex')
         self.assertEqual(grammar, Star(Union([Concat([Lit('a'), Optional(Lit('b'))]),
-                                              Concat([Lit('c'), Union([Lit('d'), Lit('e')]), Lit('f')])])))
+                                              Concat([Lit('c'), Union([Lit('d'), Lit('e')]),
+                                                      CharClass('exclusive', ['f'])])])))
 
     def test_invalid_multiple_stars(self):
         with self.assertRaises(ParseError):
-            parse_RE(r'a**')
+            parse(r'a**', format='regex')
 
-class TestParseCFG(unittest.TestCase):
+class TestParseEBNF(unittest.TestCase):
     def test_union(self):
-        grammar = parse_CFG(r'start: "foo" | "bar";')
-        self.assertEqual(grammar, [Rule(Symbol('start'), Union([Lit('foo'), Lit('bar')]))])
+        grammar = parse(r'start: "foo" | "bar";')
+        self.assertEqual(grammar, [Rule(Name('start'), Union([Lit('foo'), Lit('bar')]))])
 
     def test_concat(self):
-        grammar = parse_CFG(r'start: "foo" start "bar";')
-        self.assertEqual(grammar, [Rule(Symbol('start'), Concat([Lit('foo'), Symbol('start'), Lit('bar')]))])
+        grammar = parse(r'start: "foo" start "bar";')
+        self.assertEqual(grammar, [Rule(Name('start'), Concat([Lit('foo'), Name('start'), Lit('bar')]))])
 
     def test_star(self):
-        grammar = parse_CFG(r'start: "foo"*;')
-        self.assertEqual(grammar, [Rule(Symbol('start'), Star(Lit('foo')))])
+        grammar = parse(r'start: "foo"*;')
+        self.assertEqual(grammar, [Rule(Name('start'), Star(Lit('foo')))])
 
     def test_plus(self):
-        grammar = parse_CFG(r'start: "foo"+;')
-        self.assertEqual(grammar, [Rule(Symbol('start'), Plus(Lit('foo')))])
+        grammar = parse(r'start: "foo"+;')
+        self.assertEqual(grammar, [Rule(Name('start'), Plus(Lit('foo')))])
 
     def test_optional(self):
-        grammar = parse_CFG(r'start: "foo"?;')
-        self.assertEqual(grammar, [Rule(Symbol('start'), Optional(Lit('foo')))])
+        grammar = parse(r'start: "foo"?;')
+        self.assertEqual(grammar, [Rule(Name('start'), Optional(Lit('foo')))])
 
     def test_power(self):
-        grammar = parse_CFG(r'start: "foo"{3};')
-        self.assertEqual(grammar, [Rule(Symbol('start'), Power(Lit('foo'), 3))])
+        grammar = parse(r'start: "foo"{3};')
+        self.assertEqual(grammar, [Rule(Name('start'), Power(Lit('foo'), 3))])
 
     def test_loop(self):
-        grammar = parse_CFG(r'start: "foo"{2,5};')
-        self.assertEqual(grammar, [Rule(Symbol('start'), Loop(Lit('foo'), NatRange(2, 5)))])
+        grammar = parse(r'start: "foo"{2,5};')
+        self.assertEqual(grammar, [Rule(Name('start'), Loop(Lit('foo'), NatRange(2, 5)))])
 
     def test_loop_unbounded(self):
-        grammar = parse_CFG(r'start: "foo"{,};')
-        self.assertEqual(grammar, [Rule(Symbol('start'), Loop(Lit('foo'), NatRange(0, None)))])
+        grammar = parse(r'start: "foo"{,};')
+        self.assertEqual(grammar, [Rule(Name('start'), Loop(Lit('foo'), NatRange(0, None)))])
 
-    def test_angled_symbols(self):
-        grammar = parse_CFG(r'<start>: <foo> | <bar>;')
-        self.assertEqual(grammar, [Rule(Symbol('start'), Union([Symbol('foo'), Symbol('bar')]))])
+    def test_angled_Names(self):
+        grammar = parse(r'<start>: <foo> | <bar>;')
+        self.assertEqual(grammar, [Rule(Name('start'), Union([Name('foo'), Name('bar')]))])
 
     def test_multiple_rules(self):
-        grammar = parse_CFG(r'''
+        grammar = parse(r'''
             start: ("val" | "var") id "=" expr;
             id: [A-Za-z_][A-Za-z0-9_]*;
             expr: [0-9]+ | id | "(" expr ")" | expr ("+" | "-") expr;
         ''')
         self.assertEqual(grammar, [
-            Rule(Symbol('start'), Concat([Union([Lit('val'), Lit('var')]), Symbol('id'), Lit('='), Symbol('expr')])),
-            Rule(Symbol('id'), Concat([CharClass('inclusive', [CharRange('A', 'Z'), CharRange('a', 'z'), '_']),
+            Rule(Name('start'), Concat([Union([Lit('val'), Lit('var')]), Name('id'), Lit('='), Name('expr')])),
+            Rule(Name('id'), Concat([CharClass('inclusive', [CharRange('A', 'Z'), CharRange('a', 'z'), '_']),
                                        Star(CharClass('inclusive', [CharRange('A', 'Z'), CharRange('a', 'z'),
                                                                     CharRange('0', '9'), '_']))])),
-            Rule(Symbol('expr'), Union([Plus(CharClass('inclusive', [CharRange('0', '9')])),
-                                        Symbol('id'),
-                                        Concat([Lit('('), Symbol('expr'), Lit(')')]),
-                                        Concat([Symbol('expr'), Union([Lit('+'), Lit('-')]), Symbol('expr')])]))
+            Rule(Name('expr'), Union([Plus(CharClass('inclusive', [CharRange('0', '9')])),
+                                        Name('id'),
+                                        Concat([Lit('('), Name('expr'), Lit(')')]),
+                                        Concat([Name('expr'), Union([Lit('+'), Lit('-')]), Name('expr')])]))
         ])

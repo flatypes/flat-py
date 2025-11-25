@@ -1,9 +1,10 @@
 import ast
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Mapping
 
-from flat.py.diagnostics import Issuer, Level, Range, Location, Diagnostic
 from flat.py.ast_helpers import mk_call_rt, get_range
+from flat.lang.diagnostics import Issuer, Location, Diagnostic
+from flat.lang.translation import LangFinder, NormLang
 
 class Type:
     """Type at compile time."""
@@ -29,12 +30,11 @@ class TypeName(Type):
 
 @dataclass
 class LangType(Type):
-    grammar: str
-    key: str
+    lang_id: int
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_rt('LangType', ast.Name(self.grammar), ast.Constant(self.key))
+        return mk_call_rt('LangType', ast.Constant(self.lang_id))
 
 @dataclass
 class RefinedType(Type):
@@ -152,6 +152,11 @@ class ArgDef(VarDef):
     default: ast.expr | None
 
 @dataclass
+class LangDef(Def):
+    """Formal language definition."""
+    lang: NormLang
+
+@dataclass
 class TypeDef(Def):
     """Type definition/alias."""
     expansion: Type
@@ -226,7 +231,7 @@ class Context:
     def get(self, key: str) -> Def | None:
         scope = self._local_scopes[-1] if len(self._local_scopes) > 0 else self._global_scope
         return scope.get(key)
-
+    
     def fresh(self) -> str:
         scope = self._local_scopes[-1] if len(self._local_scopes) > 0 else self._global_scope
         return scope.fresh()
@@ -245,6 +250,10 @@ class Context:
     def lookup_global(self, key: str) -> Def | None:
         return self._global_scope.get(key)
 
+    def create_global_var(self, key: str) -> None:
+        var_def = VarDef(AnyType())
+        self._global_scope[key] = var_def
+
     def lookup_nonlocal(self, key: str) -> Def | None:
         for scope in reversed(self._local_scopes[:-1]):
             if key in scope:
@@ -252,10 +261,17 @@ class Context:
 
         return None
     
-    def create_global_var(self, key: str) -> None:
-        var_def = VarDef(AnyType())
-        self._global_scope[key] = var_def
+    @property
+    def lang_finder(self) -> LangFinder:
+        def lookup(id: str) -> NormLang | None:
+            match self.lookup(id):
+                case LangDef(lang):
+                    return lang
+                case _:
+                    return None
 
+        return lookup
+    
     def push(self, owner: FunDef, defs: dict[str, Def] = {}) -> None:
         scope = Scope(owner, defs)
         self._local_scopes.append(scope)
