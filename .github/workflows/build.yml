@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [ "3.11", "3.12", "3.13" ]
+        python-version: [ "3.12", "3.13" ]
 
     steps:
       - uses: actions/checkout@v4
@@ -14,12 +14,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
-      - name: Install dependencies
+      - name: Install
         run: |
-          pip install --upgrade pip setuptools
-          pip install --no-cache-dir -r requirements.txt
-          pip install .
-      - name: Install check
-        run: python -m flat.py -h
-      - name: Run demos
-        run: python run_demos.py
+          pip install --upgrade pip
+          pip install -e .
+          python -m flat.py -h
+      - name: Run tests
+        run: |
+          pip install -e ".[test]"
+          pytest tests

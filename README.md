@@ -34,6 +34,36 @@ Read our paper *FLAT: Formal Languages as Types* for more technical details.
 + FLAY-PY provides annotations to specify oracles/contracts in the pre-/post-condition style.
 + FLAY-PY integrates language-based test generation to fuzz your code with random inputs generated from language types.
 
+## Building
+
+Setting up a virtual environment is recommended. In the project root directory:
+
+```shell
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+In the virtual environment, install dependencies and test the CLI:
+
+```shell
+pip install --upgrade pip
+pip install -e .
+python -m flat.py --help
+```
+
+Running tests (under the `tests` directory) is easy with `pytest`:
+
+```shell
+pip install -e ".[test]"
+pytest tests
+```
+
+Setting up the development environment with `mypy`:
+
+```shell
+pip install -e ".[dev]"
+```
+
 ## Quick Tour by Example
 
 Consider an ad hoc parser that aims to extract the hostname part form the input `url`:
