@@ -1,21 +1,30 @@
 import ast
 
-from flat.lang.diagnostics import Position, Range
+from flat.py.diagnostics import Position, Range
+
+__all__ = ["mk_assign", "mk_lambda", "mk_call", "mk_call_rt",
+           "get_type_args", "get_left_values", "get_operands",
+           "get_range", "pure"]
+
 
 # Factory methods
 
 def mk_assign(target: str, value: ast.expr) -> ast.stmt:
     return ast.Assign([ast.Name(target, ctx=ast.Store())], value)
 
+
 def mk_lambda(args: list[str], body: ast.expr) -> ast.Lambda:
     arguments = ast.arguments([], [ast.arg(x) for x in args], None, [], [], None, [])
     return ast.Lambda(arguments, body)
 
+
 def mk_call(func: ast.expr, *args: ast.expr) -> ast.expr:
     return ast.Call(func, list(args), [])
 
+
 def mk_call_rt(name: str, *args: ast.expr) -> ast.expr:
     return mk_call(ast.Attribute(ast.Name(f'rt'), name), *args)
+
 
 # Extractors
 
@@ -26,10 +35,12 @@ def get_type_args(subscript: ast.Subscript) -> list[ast.expr]:
         case e:
             return [e]
 
+
 def get_left_values(target: ast.expr) -> list[ast.expr]:
     extractor = LeftValueExtractor()
     extractor.visit(target)
     return extractor.left_values
+
 
 def get_operands(expr: ast.expr, op: type[ast.operator]) -> list[ast.expr]:
     """Gets the operands of a binary operation AST."""
@@ -38,6 +49,7 @@ def get_operands(expr: ast.expr, op: type[ast.operator]) -> list[ast.expr]:
             return get_operands(left, op) + get_operands(right, op)
         case _:
             return [expr]
+
 
 class LeftValueExtractor(ast.NodeVisitor):
     def __init__(self) -> None:
@@ -53,6 +65,7 @@ class LeftValueExtractor(ast.NodeVisitor):
     def visit_Subscript(self, node: ast.Subscript) -> None:
         self.left_values.append(node)
 
+
 # def check_args(call: ast.Call, required: list[str], optional: list[tuple[str, ast.expr]] = []) -> list[ast.expr]:
 #     args: dict[str, ast.expr] = {}
 #     names = required + [x for x, _ in optional]
@@ -66,7 +79,7 @@ class LeftValueExtractor(ast.NodeVisitor):
 #                 raise TypeError(f"Argument '{kw.arg}' repeated.")
 #         else:
 #             raise TypeError(f"Unexpected keyword argument '{kw.arg}'.")
-    
+
 #     missing = set(required) - args.keys()
 #     if len(missing) > 0:
 #         raise TypeError(f"Missing required arguments: {', '.join(missing)}.")
@@ -92,6 +105,7 @@ def get_range(node: ast.AST) -> Range:
         return Range(start, end)
 
     raise ValueError("AST node does not have position information.")
+
 
 def pure(expr: ast.expr) -> bool:
     """Tests whether an expression is pure. This implementation is conservative (sound but incomplete)."""

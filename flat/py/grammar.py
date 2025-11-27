@@ -1,94 +1,110 @@
 from dataclasses import dataclass, fields
 from typing import Any, Literal, Sequence
 
-from flat.lang.diagnostics import Location
+from flat.py.diagnostics import Location
+
+__all__ = ['Node', 'Expr', 'Lit', 'CharRange', 'CharClass', 'Ref', 'Concat', 'Union',
+           'Star', 'Plus', 'Optional', 'Power', 'NatRange', 'Loop', 'ExprVisitor', 'Rule', 'Grammar']
+
 
 class Node:
-    """AST node."""
+    """Node with a location."""
     loc: Location
+
 
 @dataclass
 class Expr(Node):
-    """A regular expression or an expression in a context-free grammar."""
+    """Expression/Clause."""
     pass
+
 
 @dataclass
 class Lit(Expr):
     """String literal."""
     value: str
 
+
 @dataclass
 class CharRange(Node):
-    """Character range. Matches any character in between the bounds, both inclusive."""
+    """Character range: matches any character in between the two *inclusive* characters."""
     lower: str
     upper: str
 
+
 @dataclass
 class CharClass(Expr):
-    """Character class.
-    If inclusive, matches any character in the items.
-    If exclusive, matches any character not in the items.
-    """
+    """Character class: matches any character in (if inclusive) or not in (if exclusive) a set of chars."""
     mode: Literal['inclusive', 'exclusive']
     items: Sequence[str | CharRange]
 
+
 @dataclass
-class Name(Expr):
-    """Either a nonterminal symbol or a reference to another language.
-    If `start` is given, it is a reference to another language using this start symbol.
-    """
-    id: str
-    start: str | None = None
+class Ref(Expr):
+    """Nonterminal symbol, or reference to another language."""
+    name: str
+
 
 @dataclass
 class Concat(Expr):
     """Concatenation."""
     elements: Sequence[Expr]
 
+
 @dataclass
 class Union(Expr):
-    """Union/alternation."""
+    """Union/Alternation."""
     options: Sequence[Expr]
+
 
 @dataclass
 class Star(Expr):
-    """Kleene star."""
+    """Kleene star: repeats zero or more times."""
     element: Expr
+
 
 @dataclass
 class Plus(Expr):
-    """Kleene plus."""
+    """Kleene plus: repeats one or more times."""
     element: Expr
+
 
 @dataclass
 class Optional(Expr):
-    """Optional."""
+    """Optional: repeats zero or one time."""
     element: Expr
+
 
 @dataclass
 class Power(Expr):
-    """Power. Matches the element repeated exactly a number of times."""
+    """Power: repeats exactly a number of times."""
     element: Expr
     times: int
 
+
 @dataclass
 class NatRange(Node):
-    """Natural number range. Both bounds are inclusive. If upper is None, it is unbounded."""
+    """Natural number range: matches any number in between the two *inclusive* bounds.
+    The upper bound can be unbounded.
+    """
     lower: int
     upper: int | None
 
+
 @dataclass
 class Loop(Expr):
-    """Loop. Matches the element repeated a number of times."""    
+    """Loop: repeats a number of times in a given range."""
     element: Expr
     times: NatRange
+
 
 class ExprVisitor:
     def visit(self, node: Expr) -> Any:
         """Visit a node."""
         method_name = 'visit_' + node.__class__.__name__
-        visitor = getattr(self, method_name, self.generic_visit)
-        return visitor(node)
+        if hasattr(self, method_name):
+            return getattr(self, method_name)(node)
+        else:
+            raise NotImplementedError(f'No visit_{node.__class__.__name__} method')
 
     def generic_visit(self, node: Expr) -> Any:
         """Default visitor if no explicit visitor is given for this node."""
@@ -101,14 +117,12 @@ class ExprVisitor:
             elif isinstance(value, Expr):
                 self.visit(value)
 
-type RL = Expr
 
 @dataclass
 class Rule(Node):
     """Production rule in a context-free grammar."""
-    name: Name
+    name: Ref
     body: Expr
 
-type CFL = Sequence[Rule]
 
-type Lang = RL | CFL
+type Grammar = Sequence[Rule]

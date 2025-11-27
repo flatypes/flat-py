@@ -1,40 +1,54 @@
 import ast
 from dataclasses import dataclass
-from typing import Literal, Mapping
+from types import EllipsisType
+from typing import Literal, Mapping, Sequence
 
+from flat.backend.lang import Lang
 from flat.py.ast_helpers import mk_call_rt, get_range
-from flat.lang.diagnostics import Issuer, Location, Diagnostic
-from flat.lang.translation import LangFinder, NormLang
+from flat.py.diagnostics import Issuer, Location, Diagnostic
+
+__all__ = ['Type', 'AnyType', "TypeName", "LangType", "RefinedType",
+           "LitValue", "LitType", "none_type", "UnionType", "TupleType",
+           "SeqType", "ListType", "SetType", "DictType", "ClassType",
+           "Contract", "PreCond", "PostCond", "ExcSpec",
+           "Def", "VarDef", "ArgDef", "TypeDef", "TypeConstrDef", "FunDef",
+           "UnknownDef", "Scope", "Context"]
+
 
 class Type:
-    """Type at compile time."""
+    """(Compile-time) Type."""
 
     @property
     def ast(self) -> ast.expr:
         """The AST representation of this type."""
         raise NotImplementedError()
 
+
 @dataclass
 class AnyType(Type):
     @property
     def ast(self) -> ast.expr:
         return mk_call_rt('AnyType')
-    
+
+
 @dataclass
 class TypeName(Type):
+    """Builtin-type, or type alias reference."""
     id: str
 
     @property
     def ast(self) -> ast.expr:
         return ast.Name(self.id)
 
+
 @dataclass
 class LangType(Type):
-    lang_id: int
+    lang: Lang
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_rt('LangType', ast.Constant(self.lang_id))
+        return mk_call_rt('LangType')
+
 
 @dataclass
 class RefinedType(Type):
@@ -45,34 +59,40 @@ class RefinedType(Type):
     def ast(self) -> ast.expr:
         return mk_call_rt('RefinedType', self.base.ast, self.predicate)
 
-type LiteralValue = ast._ConstantValue
+
+type LitValue = str | bytes | bool | int | float | complex | None | EllipsisType
+
 
 @dataclass
-class LiteralType(Type):
-    values: list[LiteralValue]
+class LitType(Type):
+    values: Sequence[LitValue]
 
     @property
     def ast(self) -> ast.expr:
         return mk_call_rt('LiteralType', ast.List([ast.Constant(v) for v in self.values]))
 
-none_type = LiteralType([None])
+
+none_type = LitType([None])
+
 
 @dataclass
 class UnionType(Type):
-    options: list[Type]
+    options: Sequence[Type]
 
     @property
     def ast(self) -> ast.expr:
         return mk_call_rt('UnionType', ast.List([t.ast for t in self.options]))
 
+
 @dataclass
 class TupleType(Type):
-    elements: list[Type]
+    elements: Sequence[Type]
     variant: bool = False
 
     @property
     def ast(self) -> ast.expr:
         return mk_call_rt('TupleType', ast.List([t.ast for t in self.elements]))
+
 
 @dataclass
 class SeqType(Type):
@@ -82,6 +102,7 @@ class SeqType(Type):
     def ast(self) -> ast.expr:
         return mk_call_rt('SeqType', self.element.ast)
 
+
 @dataclass
 class ListType(Type):
     element: Type
@@ -89,7 +110,8 @@ class ListType(Type):
     @property
     def ast(self) -> ast.expr:
         return mk_call_rt('ListType', self.element.ast)
-    
+
+
 @dataclass
 class SetType(Type):
     element: Type
@@ -97,7 +119,8 @@ class SetType(Type):
     @property
     def ast(self) -> ast.expr:
         return mk_call_rt('SetType', self.element.ast)
-    
+
+
 @dataclass
 class DictType(Type):
     key: Type
@@ -106,6 +129,7 @@ class DictType(Type):
     @property
     def ast(self) -> ast.expr:
         return mk_call_rt('DictType', self.key.ast, self.value.ast)
+
 
 @dataclass
 class ClassType(Type):
@@ -116,18 +140,22 @@ class ClassType(Type):
     def ast(self) -> ast.expr:
         return mk_call_rt('ClassType', ast.Constant(self.id),
                           ast.Dict([ast.Constant(k) for k in self.fields.keys()],
-                                    [v.ast for v in self.fields.values()]))
+                                   [v.ast for v in self.fields.values()]))
+
 
 class Contract:
     pass
+
 
 @dataclass
 class PreCond(Contract):
     predicate: ast.expr
 
+
 @dataclass
 class PostCond(Contract):
     predicate: ast.expr
+
 
 @dataclass
 class ExcSpec(Contract):
@@ -140,10 +168,12 @@ class Def:
     """Definition at semantic level."""
     pass
 
+
 @dataclass
 class VarDef(Def):
     """Variable definition."""
     typ: Type
+
 
 @dataclass
 class ArgDef(VarDef):
@@ -151,26 +181,25 @@ class ArgDef(VarDef):
     kind: Literal['arg', 'vararg', 'kwarg']
     default: ast.expr | None
 
-@dataclass
-class LangDef(Def):
-    """Formal language definition."""
-    lang: NormLang
 
 @dataclass
 class TypeDef(Def):
     """Type definition/alias."""
     expansion: Type
 
+
 @dataclass
 class TypeConstrDef(Def):
     """Type constructor definition."""
     id: str
 
+
 @dataclass
 class FunDef(Def):
-    args: list[str]
+    args: Sequence[str]
     return_type: Type
-    contracts: list[Contract]
+    contracts: Sequence[Contract]
+
 
 class UnknownDef(Def):
     pass
@@ -181,7 +210,7 @@ class Scope:
     _defs: dict[str, Def]
     _next_fresh: int
 
-    def __init__(self, owner: FunDef | None, defs: dict[str, Def] = {}) -> None:
+    def __init__(self, owner: FunDef | None, defs: Mapping[str, Def] = {}) -> None:
         self.owner = owner
         self._defs = {}
         self._defs.update(defs)
@@ -189,10 +218,10 @@ class Scope:
 
     def __contains__(self, key: str) -> bool:
         return key in self._defs
-    
+
     def __getitem__(self, key: str) -> Def:
         return self._defs[key]
-    
+
     def __setitem__(self, key: str, value: Def) -> None:
         self._defs[key] = value
 
@@ -204,13 +233,14 @@ class Scope:
         self._next_fresh += 1
         return key
 
+
 class Context:
     file_path: str
     issuer: Issuer
     _global_scope: Scope
     _local_scopes: list[Scope]
 
-    def __init__(self, file_path: str, issuer: Issuer, defs: dict[str, Def] = {}) -> None:
+    def __init__(self, file_path: str, issuer: Issuer, defs: Mapping[str, Def] = {}) -> None:
         self.file_path = file_path
         self.issuer = issuer
         self._global_scope = Scope(None, defs)
@@ -219,11 +249,11 @@ class Context:
     def __contains__(self, key: str) -> bool:
         scope = self._local_scopes[-1] if len(self._local_scopes) > 0 else self._global_scope
         return key in scope
-    
+
     def __getitem__(self, key: str) -> Def:
         scope = self._local_scopes[-1] if len(self._local_scopes) > 0 else self._global_scope
         return scope[key]
-    
+
     def __setitem__(self, key: str, value: Def) -> None:
         scope = self._local_scopes[-1] if len(self._local_scopes) > 0 else self._global_scope
         scope[key] = value
@@ -231,7 +261,7 @@ class Context:
     def get(self, key: str) -> Def | None:
         scope = self._local_scopes[-1] if len(self._local_scopes) > 0 else self._global_scope
         return scope.get(key)
-    
+
     def fresh(self) -> str:
         scope = self._local_scopes[-1] if len(self._local_scopes) > 0 else self._global_scope
         return scope.fresh()
@@ -260,19 +290,8 @@ class Context:
                 return scope[key]
 
         return None
-    
-    @property
-    def lang_finder(self) -> LangFinder:
-        def lookup(id: str) -> NormLang | None:
-            match self.lookup(id):
-                case LangDef(lang):
-                    return lang
-                case _:
-                    return None
 
-        return lookup
-    
-    def push(self, owner: FunDef, defs: dict[str, Def] = {}) -> None:
+    def push(self, owner: FunDef, defs: Mapping[str, Def] = {}) -> None:
         scope = Scope(owner, defs)
         self._local_scopes.append(scope)
 

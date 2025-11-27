@@ -6,11 +6,11 @@ import time
 from types import TracebackType
 from typing import Any, Callable, Generator, Optional, get_args
 
+from flat.py.errors import *
 from isla.solver import ISLaSolver
 
+from flat.backend.isla_extensions import *
 from flat.py import FuzzReport
-from flat.py.errors import *
-from flat.py.isla_extensions import *
 from flat.typing import Type, value_has_type, LangType, ListType
 
 

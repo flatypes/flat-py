@@ -3,7 +3,7 @@ from copy import deepcopy
 from enum import Enum
 from typing import Callable, Optional, Tuple, Any
 
-from flat.py.isla_extensions import EBNF_DIRECT_CHILD, EBNF_KTH_CHILD
+from flat.backend.isla_extensions import EBNF_DIRECT_CHILD, EBNF_KTH_CHILD
 from flat.selectors import *
 
 
