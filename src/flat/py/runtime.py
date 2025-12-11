@@ -1,197 +1,373 @@
 import ast
-import importlib.util
 import inspect
+import itertools
+import linecache
 import sys
-import time
-from types import TracebackType
-from typing import Any, Callable, Generator, Optional, get_args
+import traceback
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from types import TracebackType, FrameType
+from typing import Callable, Sequence
 
-from flat.py.errors import *
-from isla.solver import ISLaSolver
+from flat.backend.lang import Lang
 
-from flat.backend.isla_extensions import *
-from flat.py import FuzzReport
-from flat.typing import Type, value_has_type, LangType, ListType
-
-
-def load_source_module(path: str) -> None:
-    spec = importlib.util.spec_from_file_location('_.source', path)
-    source_module = importlib.util.module_from_spec(spec)
-    sys.modules['_.source'] = source_module
-    spec.loader.exec_module(source_module)
+__all__ = ['Type', 'BuiltinType', 'LangType', 'RefinedType', 'LitType',
+           'UnionType', 'TupleType', 'ListType', 'SetType', 'DictType',
+           'SOURCE', 'LINENO', 'check_arg_type', 'check_pre', 'check_type', 'check_post']
 
 
-def has_type(obj: Any, expected: Any) -> bool:
-    if isinstance(expected, Type):
-        match obj:
-            case (int() | bool() | str()) as v:
-                return value_has_type(v, expected)
-            case list() as xs:
-                match expected:
-                    case ListType(t):
-                        return all(has_type(x, t) for x in xs)
-                    case _:
-                        return False
-            case _:
-                raise RuntimeError(f'cannot check type for object {obj} with type {type(obj)}')
-    else:  # Literal
-        values = get_args(expected)
-        return obj in values
+## Types ##
+
+class Type(ABC):
+    """(Runtime) Type."""
+
+    @abstractmethod
+    def __contains__(self, value: object) -> bool:
+        """Test if value is a member of this type."""
+        raise NotImplementedError()
 
 
-def assert_type(value: Any, value_loc: Loc, expected_type: Type):
-    if not has_type(value, expected_type):
-        raise TypeMismatch(str(expected_type), show_value(value), value_loc)
+@dataclass
+class BuiltinType(Type):
+    """Builtin type."""
+    py_type: type
+
+    def __contains__(self, value: object) -> bool:
+        return isinstance(value, self.py_type)
+
+    def __str__(self) -> str:
+        return self.py_type.__name__
 
 
-def assert_arg_type(value: Any, k: int, of_method: str, expected_type: Type):
-    if not has_type(value, expected_type):
-        raise ArgTypeMismatch(str(expected_type), show_value(value), k, of_method)
+@dataclass
+class LangType(Type):
+    """Language type."""
+    lang: Lang
+
+    def __contains__(self, value: object) -> bool:
+        return isinstance(value, str)  # TODO: parse
+
+    def __str__(self) -> str:
+        return f'lang({self.lang})'
 
 
-def assert_pre(cond: bool, args: list[Tuple[str, Any]], of_method: str):
+@dataclass
+class RefinedType(Type):
+    """Refinement type."""
+    base: Type
+    predicate: Callable[[object], bool]
+
+    def __contains__(self, value: object) -> bool:
+        return value in self.base and self.predicate(value)
+
+    def __str__(self) -> str:
+        return f'refine({self.base}, ...)'
+
+
+@dataclass
+class LitType(Type):
+    """Literal type."""
+    values: Sequence[object]
+
+    def __contains__(self, value: object) -> bool:
+        return value in self.values
+
+    def __str__(self) -> str:
+        return f'Literal[{", ".join(repr(v) for v in self.values)}]'
+
+
+@dataclass
+class UnionType(Type):
+    """Union type."""
+    options: Sequence[Type]
+
+    def __contains__(self, value: object) -> bool:
+        return any(value in t for t in self.options)
+
+    def __str__(self) -> str:
+        return ' | '.join(str(t) for t in self.options)
+
+
+@dataclass
+class TupleType(Type):
+    """Tuple type."""
+    elements: Sequence[Type]
+
+    def __contains__(self, value: object) -> bool:
+        if not isinstance(value, tuple) or len(value) != len(self.elements):
+            return False
+        return all(v in t for v, t in zip(value, self.elements))
+
+    def __str__(self) -> str:
+        return f'tuple[{", ".join(str(t) for t in self.elements)}]'
+
+
+@dataclass
+class ListType(Type):
+    """List type."""
+    element_type: Type
+
+    def __contains__(self, value: object) -> bool:
+        if not isinstance(value, list):
+            return False
+        return all(v in self.element_type for v in value)
+
+    def __str__(self) -> str:
+        return f'list[{self.element_type}]'
+
+
+@dataclass
+class SetType(Type):
+    """Set type."""
+    elem_type: Type
+
+    def __contains__(self, value: object) -> bool:
+        if not isinstance(value, set):
+            return False
+        return all(v in self.elem_type for v in value)
+
+    def __str__(self) -> str:
+        return f'set[{self.elem_type}]'
+
+
+@dataclass
+class DictType(Type):
+    """Dictionary type."""
+    key_type: Type
+    value_type: Type
+
+    def __contains__(self, value: object) -> bool:
+        if not isinstance(value, dict):
+            return False
+        return all(k in self.key_type and v in self.value_type for k, v in value.items())
+
+    def __str__(self) -> str:
+        return f'dict[{self.key_type}, {self.value_type}]'
+
+
+@dataclass(frozen=True)
+class Range:
+    lineno: int
+    end_lineno: int
+    col_offset: int
+    end_col_offset: int
+
+    def to_rel(self, base_lineno: int | None = None) -> 'Range':
+        if base_lineno is None:
+            base_lineno = self.lineno
+        return Range(self.lineno - base_lineno + 1, self.end_lineno - base_lineno + 1,
+                     self.col_offset, self.end_col_offset)
+
+    def to_abs(self, base_lineno: int) -> 'Range':
+        return Range(base_lineno + self.lineno - 1, base_lineno + self.end_lineno - 1,
+                     self.col_offset, self.end_col_offset)
+
+
+def get_range(node: ast.AST) -> Range:
+    lineno = getattr(node, 'lineno')
+    end_lineno = getattr(node, 'end_lineno')
+    col_offset = getattr(node, 'col_offset')
+    end_col_offset = getattr(node, 'end_col_offset')
+
+    assert lineno is not None
+    assert end_lineno is not None
+    assert col_offset is not None
+    assert end_col_offset is not None
+    return Range(lineno, end_lineno, col_offset, end_col_offset)
+
+
+## Checks ##
+
+SOURCE = '__source__'
+LINENO = '__lineno__'
+
+
+def check_arg_type(actual: object, expected: Type,
+                   position: int | None, keyword: str | None, default_range: Range | None) -> None:
+    """Check the type of function argument."""
+    if actual not in expected:
+        print("-- Runtime Type Error: type mismatch", file=sys.stderr)
+
+        frame = inspect.currentframe()
+        assert frame is not None
+        frame = frame.f_back  # f = caller of this checker
+        assert frame is not None
+        fun_source = frame.f_globals[SOURCE]
+
+        frame = frame.f_back  # caller of f
+        assert frame is not None
+        source = frame.f_globals[SOURCE]
+        call = locate_call_in_source(frame)
+        assert isinstance(call, ast.Call)
+
+        match locate_arg(call, position, keyword):
+            case None:
+                assert default_range is not None
+                print_details(fun_source, default_range,
+                              [f"default value does not match expected type {expected}"])
+            case arg:
+                print_details(source, get_range(arg),
+                              [f"expected type: {expected}", f"actual value:  {repr(actual)}"])
+        print_tb(frame)
+
+
+def locate_call_in_source(frame: FrameType) -> ast.Call:
+    """Locate the last executed call of this frame in the corresponding source file."""
+    # Ref: traceback._get_code_position
+    assert frame.f_lasti >= 0
+    positions_gen = frame.f_code.co_positions()
+    x1, x2, y1, y2 = next(itertools.islice(positions_gen, frame.f_lasti // 2, None))
+
+    # Extract code
+    assert x1 is not None
+    assert x2 is not None
+    assert y1 is not None
+    assert y2 is not None
+    code = ''
+    for lineno in range(x1, x2 + 1):
+        line = linecache.getline(frame.f_code.co_filename, lineno)
+        start = y1 if lineno == x1 else 0
+        end = y2 if lineno == x2 else len(line)
+        code += line[start:end]
+
+    # Locate in source AST
+    source = frame.f_globals[SOURCE]
+    with open(source) as f:
+        source_code = f.read()
+    tree = ast.parse(source_code)
+    lineno = frame.f_locals[LINENO]
+    locator = CallLocator(lineno, code)
+    locator.visit(tree)
+    assert locator.result is not None, f"Could not locate '{code}' in {source}"
+    return locator.result
+
+
+class CallLocator(ast.NodeVisitor):
+    def __init__(self, lineno: int, call_code: str) -> None:
+        super().__init__()
+        self.lineno = lineno
+        self.call_code = call_code
+        self.result: ast.Call | None = None
+
+    def visit_Call(self, node: ast.Call) -> None:
+        assert hasattr(node, 'lineno')
+        lineno: int = getattr(node, 'lineno')
+        end_lineno: int = getattr(node, 'end_lineno', lineno)
+        if lineno <= self.lineno <= end_lineno:
+            if ast.unparse(node) == self.call_code:
+                self.result = node
+                return
+
+            self.generic_visit(node)
+
+
+def locate_arg(call: ast.Call, position: int | None, keyword: str | None) -> ast.expr | None:
+    if position is not None and position < len(call.args):  # this is a positional argument
+        return call.args[position]
+
+    if keyword is not None:
+        for kw in call.keywords:
+            if kw.arg == keyword:  # this is a keyword argument
+                return kw.value
+
+    return None
+
+
+def check_pre(cond: bool, cond_range: Range) -> None:
+    """Check precondition."""
     if not cond:
-        raise PreconditionViolated(of_method, [(name, show_value(v)) for name, v in args])
+        print("-- Runtime Type Error: precondition violated", file=sys.stderr)
 
+        frame = inspect.currentframe()
+        assert frame is not None
+        frame = frame.f_back  # f = caller of this checker
+        assert frame is not None
+        cond_source = frame.f_globals[SOURCE]
 
-def assert_post(cond: bool, args: list[Tuple[str, Any]], return_value: Any, return_value_loc: Loc, of_method: str):
-    if not cond:
-        raise PostconditionViolated(of_method, [(name, show_value(v)) for name, v in args],
-                                    show_value(return_value), return_value_loc)
+        frame = frame.f_back  # caller of f
+        assert frame is not None
+        source = frame.f_globals[SOURCE]
+        call = locate_call_in_source(frame)
 
-
-class ExpectExceptions:
-    def __init__(self, exc_info: list[Tuple[bool, type[BaseException], Loc]]) -> None:
-        """Expect a specified type of exception if its condition is held.
-        Assuming the conditions are disjoint."""
-        self.expected_type: Optional[type] = None
-        self.loc: Optional[Loc] = None
-
-        for b, exc_type, loc in exc_info:
-            if b:
-                self.expected_type = exc_type
-                self.loc = loc
-                break
-
-    def __enter__(self) -> Any:
-        return self
-
-    def __exit__(self, exc_type: type, exc_value: BaseException, tb: TracebackType) -> bool:
-        if self.expected_type is not None:
-            if exc_type is self.expected_type:
-                return True  # success, ignore exc
-            # failure: raise another error
-            raise NoExpectedException(self.expected_type, self.loc)
-
-        # no expected error: handle normally
-        return False
-
-
-def show_value(value: Any):
-    match value:
-        case str() as s:
-            return ast.unparse(ast.Constant(s))
-        case _:
-            return str(value)
-
-
-Gen = Generator[Any, None, None]
-
-
-def constant_generator(value: Any) -> Gen:
-    while True:
-        yield value
-
-
-def choice_generator(choices: list[Any]) -> Gen:
-    for value in choices:
-        yield value
-
-
-def isla_generator(typ: LangType, formula: Optional[str] = None) -> Gen:
-    assert typ is not None
-    volume = 10
-    solver = ISLaSolver(typ.grammar.isla_solver.grammar, formula,
-                        structural_predicates={EBNF_DIRECT_CHILD, EBNF_KTH_CHILD},
-                        max_number_free_instantiations=volume)
-    while True:
-        try:
-            yield solver.solve().to_string()
-        except StopIteration:
-            volume *= 2
-            solver = ISLaSolver(typ.grammar.isla_solver.grammar, formula,
-                                structural_predicates={EBNF_DIRECT_CHILD, EBNF_KTH_CHILD},
-                                max_number_free_instantiations=volume)
-
-
-def producer(generator: Gen, test: Callable[[Any], bool]) -> Gen:
-    while True:
-        try:
-            value = next(generator)
-        except StopIteration:
-            break
-        if test(value):
-            yield value
-
-
-def product_producer(producers: list[Gen], test: Callable[[Any], bool]) -> Gen:
-    while True:
-        try:
-            values = [next(p) for p in producers]
-        except StopIteration:
-            break
-        if test(*values):
-            yield values
-
-
-def fuzz(target: Callable, times: int, args_producer: Gen, verbose: bool = False) -> FuzzReport:
-    # copy __source__, __line__ from the last frame
-    frame = inspect.currentframe()
-    back_frame = frame.f_back
-    if '__line__' in back_frame.f_locals:
-        frame.f_locals['__line__'] = back_frame.f_locals['__line__']
-        frame.f_globals['__source__'] = back_frame.f_globals['__source__']
-
-    producer_time = 0.0
-    exe_time = 0.0
-    records = []
-    for i in range(times):
-        try:
-            t = time.process_time()
-            inputs = next(args_producer)
-            producer_time += (time.process_time() - t)
-        except StopIteration:
-            break
-
-        t = time.process_time()
-        try:
-            target(*inputs)
-        except Error as err:
-            exe_time += (time.process_time() - t)
-            records.append((tuple(inputs), 'Error'))
-            # cprint(f'[Error] {target.__name__}{tuple(inputs)}', 'red')
-            # err.print()
-        except Exception as exc:
-            exe_time += (time.process_time() - t)
-            records.append((tuple(inputs), 'Error'))
-            # cprint(f'[Error] {target.__name__}{tuple(inputs)}', 'red')
-            # cprint('{}: {}'.format(type(exc).__name__, exc), 'red')
-        except SystemExit:
-            exe_time += (time.process_time() - t)
-            records.append((tuple(inputs), 'Exited'))
-            # cprint(f'[Exited] {target.__name__}{tuple(inputs)}', 'red')
+        call_range = get_range(call)
+        if source == cond_source:
+            width = max(len(str(call_range.end_lineno)), len(str(cond_range.end_lineno)))
+            print_details(source, call_range, [], width=width)
+            print_details(cond_source, cond_range, ["note: precondition is defined here"], width=width,
+                          show_file_path=False)
         else:
-            exe_time += (time.process_time() - t)
-            records.append((tuple(inputs), 'OK'))
-            # if verbose:
-            #     cprint(f'[OK] {target.__name__}{tuple(inputs)}', 'green')
+            print_details(source, call_range, [])
+            print("note: precondition is defined here", file=sys.stderr)
+            print_details(cond_source, cond_range, [])
 
-    # print(f'{target.__name__}: {passed[target.__name__]}/{times} passed, {total_time[target.__name__]} ms')
-    return FuzzReport(target.__name__, records, producer_time, exe_time)
+        print_tb(frame)
 
 
-def run_main(main: Callable) -> None:
-    try:
-        main()
-    except Error as err:
-        err.print()
+def check_type(actual: object, expected: Type, actual_range: Range) -> None:
+    """Check the type of value."""
+    if actual not in expected:
+        print("-- Runtime Type Error: type mismatch", file=sys.stderr)
+
+        frame = inspect.currentframe()
+        assert frame is not None
+        frame = frame.f_back  # f = caller of this checker
+        assert frame is not None
+        source = frame.f_globals[SOURCE]
+        print_details(source, actual_range,
+                      [f"expected type: {expected}", f"actual value:  {repr(actual)}"])
+
+        frame = frame.f_back  # caller of f
+        assert frame is not None
+        print_tb(frame)
+
+
+def check_post(cond: bool, cond_range: Range, return_range: Range) -> None:
+    """Check postcondition."""
+    if not cond:
+        print("-- Runtime Type Error: postcondition violated", file=sys.stderr)
+
+        frame = inspect.currentframe()
+        assert frame is not None
+        frame = frame.f_back  # f = caller of this checker
+        assert frame is not None
+        source = frame.f_globals[SOURCE]
+        width = max(len(str(return_range.end_lineno)), len(str(return_range.end_lineno)))
+        print_details(source, return_range, [], width=width)
+        print_details(source, cond_range, ["note: postcondition is defined here"], width=width,
+                      show_file_path=False)
+
+        frame = frame.f_back  # caller of f
+        assert frame is not None
+        print_tb(frame)
+
+
+def print_details(file_path: str, caret_range: Range, details: Sequence[str],
+                  *, width: int | None = None, show_file_path: bool = True) -> None:
+    lineno_width = width if width is not None else len(str(caret_range.end_lineno))
+    if show_file_path:
+        print(' ' * lineno_width + f'--> {file_path}:{caret_range.lineno}', file=sys.stderr)
+
+    before_caret = ''
+    for lineno in range(caret_range.lineno, caret_range.end_lineno + 1):
+        line = linecache.getline(file_path, lineno)
+        lineno_str = str(lineno).ljust(lineno_width)
+        print(f'{lineno_str} |{line}', end='', file=sys.stderr)
+        start = caret_range.col_offset if lineno == caret_range.lineno else 0
+        end = caret_range.end_col_offset if lineno == caret_range.end_lineno else len(line)
+        before_caret = ' ' * lineno_width + ' |' + ' ' * start
+        print(before_caret + '^' * (end - start), file=sys.stderr)
+    for detail in details:
+        print(before_caret + detail, file=sys.stderr)
+
+
+def print_tb(frame: FrameType) -> None:
+    print('Traceback (most recent call first):', file=sys.stderr)
+    for f, _ in traceback.walk_stack(frame):
+        source = f.f_globals.get(SOURCE)
+        lineno = f.f_locals.get(LINENO)
+        print(f'  File "{source}", line {lineno}, in {f.f_code.co_name}', file=sys.stderr)
+        tb = TracebackType(None, f, f.f_lasti, f.f_lineno)
+        extracted = traceback.extract_tb(tb)
+        for line in traceback.format_list(extracted)[0].splitlines(keepends=True)[1:]:
+            print(line, end='', file=sys.stderr)
+    print('', file=sys.stderr)

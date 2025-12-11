@@ -1,3 +1,4 @@
+import ast
 from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable
@@ -6,6 +7,10 @@ __all__ = ['Position', 'Range', 'Location', 'Level', 'Diagnostic', 'Issuer',
            'InvalidSyntax', 'UndefinedRule', 'RedefinedRule', 'NoStartRule', 'EmptyRange',
            'UndefinedName', 'RedefinedName', 'InvalidType', 'InvalidLiteral', 'InvalidFormat',
            'ArityMismatch', 'UndefinedNonlocal', 'NotAssignable', 'UnsupportedFeature']
+
+
+def mk_call(func: ast.expr, *args: ast.expr) -> ast.expr:
+    return ast.Call(func, list(args), [])
 
 
 @dataclass
@@ -37,6 +42,10 @@ class Location:
     """Location in a file: consists of the file path and a range within that file."""
     file_path: str
     range: Range
+
+    @property
+    def to_ast(self) -> ast.expr:
+        raise NotImplementedError
 
     def __str__(self):
         return f"{self.file_path}:{self.range.start}"
@@ -116,6 +125,11 @@ class EmptyRange(Diagnostic):
         super().__init__(level=Level.WARN, loc=loc, msg=f"Empty range: {lower} > {upper}")
 
 
+class ArityMismatch(Diagnostic):
+    def __init__(self, fun: str, expected: int | str, actual: int, loc: Location) -> None:
+        super().__init__(loc=loc, msg=f"Arity mismatch: {fun} expects {expected} argument(s), got {actual}")
+
+
 class UndefinedName(Diagnostic):
     def __init__(self, id: str, loc: Location) -> None:
         super().__init__(loc=loc, msg=f"Undefined name: {id}")
@@ -139,12 +153,6 @@ class InvalidLiteral(Diagnostic):
 class InvalidFormat(Diagnostic):
     def __init__(self, loc: Location) -> None:
         super().__init__(loc=loc, msg=f"Invalid grammar format")
-
-
-class ArityMismatch(Diagnostic):
-    def __init__(self, id: str, expected: str, actual: int, loc: Location) -> None:
-        super().__init__(loc=loc,
-                         msg=f"Type constructor '{id}' expects {expected} argument(s), got {actual}")
 
 
 class UndefinedNonlocal(Diagnostic):

@@ -4,15 +4,14 @@ from types import EllipsisType
 from typing import Literal, Mapping, Sequence
 
 from flat.backend.lang import Lang
-from flat.py.ast_helpers import mk_call_rt, get_range
-from flat.py.diagnostics import Issuer, Location, Diagnostic
+from flat.py.ast_helpers import mk_call_rt, mk_call
+from flat.py.diagnostics import Issuer, Location, Diagnostic, Position, Range
 
-__all__ = ['Type', 'AnyType', "TypeName", "LangType", "RefinedType",
-           "LitValue", "LitType", "none_type", "UnionType", "TupleType",
-           "SeqType", "ListType", "SetType", "DictType", "ClassType",
-           "Contract", "PreCond", "PostCond", "ExcSpec",
-           "Def", "VarDef", "ArgDef", "TypeDef", "TypeConstrDef", "FunDef",
-           "UnknownDef", "Scope", "Context"]
+__all__ = ['Type', 'AnyType', 'TypeName', 'LangType', 'RefinedType', 'LitType', 'none_type', 'UnionType',
+           'TupleType', 'SeqType', 'ListType', 'SetType', 'DictType', 'ClassType',
+           'Contract', 'Require', 'Ensure',
+           'Def', 'AnnDef', 'TypeDef', 'TypeConstrDef', 'VarDef', 'ArgDef', 'FunDef', 'UnknownDef',
+           'Scope', 'Context']
 
 
 class Type:
@@ -34,11 +33,11 @@ class AnyType(Type):
 @dataclass
 class TypeName(Type):
     """Builtin-type, or type alias reference."""
-    id: str
+    name: str
 
     @property
     def ast(self) -> ast.expr:
-        return ast.Name(self.id)
+        return mk_call('rt.BuiltinType', ast.Name(self.name))
 
 
 @dataclass
@@ -69,7 +68,7 @@ class LitType(Type):
 
     @property
     def ast(self) -> ast.expr:
-        return mk_call_rt('LiteralType', ast.List([ast.Constant(v) for v in self.values]))
+        return mk_call_rt('LitType', ast.List([ast.Constant(v) for v in self.values]))
 
 
 none_type = LitType([None])
@@ -148,19 +147,15 @@ class Contract:
 
 
 @dataclass
-class PreCond(Contract):
-    predicate: ast.expr
+class Require(Contract):
+    cond: ast.expr  # bind to function args
+    cond_tree: ast.expr
 
 
 @dataclass
-class PostCond(Contract):
-    predicate: ast.expr
-
-
-@dataclass
-class ExcSpec(Contract):
-    exception: ast.expr
-    when: ast.expr
+class Ensure(Contract):
+    cond: ast.expr  # bind to function args and '_' (for the return value)
+    cond_tree: ast.expr
 
 
 @dataclass
@@ -170,16 +165,9 @@ class Def:
 
 
 @dataclass
-class VarDef(Def):
-    """Variable definition."""
-    typ: Type
-
-
-@dataclass
-class ArgDef(VarDef):
-    """Function argument definition."""
-    kind: Literal['arg', 'vararg', 'kwarg']
-    default: ast.expr | None
+class AnnDef(Def):
+    """FLAT annotation."""
+    qual_name: str
 
 
 @dataclass
@@ -192,6 +180,19 @@ class TypeDef(Def):
 class TypeConstrDef(Def):
     """Type constructor definition."""
     id: str
+
+
+@dataclass
+class VarDef(Def):
+    """Variable definition."""
+    typ: Type
+
+
+@dataclass
+class ArgDef(VarDef):
+    """Function argument definition."""
+    kind: Literal['posonly', 'normal', '*', 'kwonly', '**']
+    default: ast.expr | None
 
 
 @dataclass
@@ -303,4 +304,12 @@ class Context:
         self.issuer.issue(diagnostic)
 
     def get_loc(self, node: ast.AST) -> Location:
-        return Location(self.file_path, get_range(node))
+        if hasattr(node, 'lineno') and hasattr(node, 'col_offset'):
+            start = Position(node.lineno, node.col_offset + 1)
+            if hasattr(node, 'end_lineno') and hasattr(node, 'end_col_offset'):
+                end = Position(node.end_lineno, node.end_col_offset + 1)
+            else:
+                end = start
+            return Location(self.file_path, Range(start, end))
+
+        raise ValueError("AST node does not have position information.")

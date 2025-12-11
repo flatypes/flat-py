@@ -2,34 +2,38 @@ import ast
 import os
 import sys
 from argparse import ArgumentParser
+from typing import Sequence
 
 from flat.py.checker import check
 from flat.py.diagnostics import Issuer
 
 
-def check_path(path: str, out_dir: str) -> None:
-    if not os.path.exists(path):
-        print(f"Error: file not found: {path}", file=sys.stderr)
-        sys.exit(1)
-
+def run(in_paths: Sequence[str], out_dir: str) -> None:
     issuer = Issuer()
     os.makedirs(out_dir, exist_ok=True)
-    if os.path.isfile(path):
-        process_file(path, issuer, out_dir)
-    else:
-        for entry in os.listdir(path):
-            entry_path = os.path.join(path, entry)
-            if os.path.isfile(entry_path) and entry_path.endswith('.py'):
-                process_file(entry_path, issuer, out_dir)
-    if issuer.has_diagnostics:
-        print(issuer.pretty(), file=sys.stderr)
+
+    for path in in_paths:
+        if not os.path.exists(path):
+            print(f"Error: file not found: {path}", file=sys.stderr)
+            sys.exit(1)
+
+        if os.path.isfile(path):
+            process_file(os.path.abspath(path), issuer, out_dir)
+        else:
+            for entry in os.listdir(path):
+                entry_path = os.path.join(path, entry)
+                if os.path.isfile(entry_path) and entry_path.endswith('.py'):
+                    process_file(os.path.abspath(entry_path), issuer, out_dir)
+
+        if issuer.has_diagnostics:
+            print(issuer.pretty(), file=sys.stderr)
 
 
 def process_file(file_path: str, issuer: Issuer, out_dir: str) -> None:
     with open(file_path) as f:
         source = f.read()
     tree = ast.parse(source, filename=file_path)
-    out_tree = check(tree, issuer)
+    out_tree = check(tree, issuer, file_path=file_path)
     if not issuer.has_errors:
         ast.fix_missing_locations(out_tree)
         out_source = ast.unparse(out_tree)
@@ -42,8 +46,8 @@ def process_file(file_path: str, issuer: Issuer, out_dir: str) -> None:
 
 if __name__ == '__main__':
     parser = ArgumentParser(prog='flat.py')
-    parser.add_argument('INPUT_FILE', help='input files')
-    parser.add_argument('-o', '--output-dir', default='examples/out', help='output folder')
+    parser.add_argument('INPUT_FILE', nargs='+', help='input files')
+    parser.add_argument('-o', '--output-dir', default='out', help='output directory')
 
     args = parser.parse_args()
-    check_path(args.INPUT_FILE, args.output_dir)
+    run(args.INPUT_FILE, args.output_dir)

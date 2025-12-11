@@ -64,6 +64,13 @@ Setting up the development environment with `mypy`:
 pip install -e ".[dev]"
 ```
 
+Generating distribution packages with `build`:
+
+```shell
+pip install --upgrade build
+python -m build
+```
+
 ## Quick Tour by Example
 
 Consider an ad hoc parser that aims to extract the hostname part form the input `url`:
