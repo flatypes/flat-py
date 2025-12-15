@@ -1,7 +1,7 @@
 from dataclasses import dataclass, fields
 from typing import Any, Literal, Sequence
 
-from flat.py.diagnostics import Location
+from flat.py.shared import Range
 
 __all__ = ['Node', 'Expr', 'Lit', 'CharRange', 'CharClass', 'Ref', 'Concat', 'Union',
            'Star', 'Plus', 'Optional', 'Power', 'NatRange', 'Loop', 'ExprVisitor', 'Rule', 'Grammar']
@@ -9,7 +9,7 @@ __all__ = ['Node', 'Expr', 'Lit', 'CharRange', 'CharClass', 'Ref', 'Concat', 'Un
 
 class Node:
     """Node with a location."""
-    loc: Location
+    pos: Range
 
 
 @dataclass
@@ -40,7 +40,7 @@ class CharClass(Expr):
 
 @dataclass
 class Ref(Expr):
-    """Nonterminal symbol, or reference to another language."""
+    """Reference to a rule (possibly in another grammar)."""
     name: str
 
 

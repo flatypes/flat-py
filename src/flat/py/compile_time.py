@@ -1,201 +1,191 @@
 import ast
+import sys
+from abc import abstractmethod, ABC
 from dataclasses import dataclass
+from enum import Enum
 from types import EllipsisType
-from typing import Literal, Mapping, Sequence
+from typing import Literal, Mapping, Sequence, Any
 
 from flat.backend.lang import Lang
-from flat.py.ast_helpers import mk_call_rt, mk_call
-from flat.py.diagnostics import Issuer, Location, Diagnostic, Position, Range
+from flat.py.ast_helpers import mk_call
+from flat.py.shared import Range, print_details
 
-__all__ = ['Type', 'AnyType', 'TypeName', 'LangType', 'RefinedType', 'LitType', 'none_type', 'UnionType',
-           'TupleType', 'SeqType', 'ListType', 'SetType', 'DictType', 'ClassType',
-           'Contract', 'Require', 'Ensure',
-           'Def', 'AnnDef', 'TypeDef', 'TypeConstrDef', 'VarDef', 'ArgDef', 'FunDef', 'UnknownDef',
-           'Scope', 'Context']
+__all__ = ['Type', 'AnyType', 'TypeName', 'LangType', 'RefinedType',
+           'LitValue', 'LitType', 'none_type', 'UnionType', 'TupleType', 'ListType',
+           'SetType', 'DictType', 'ClassType', 'Contract', 'Require', 'Ensure',
+           'Def', 'AnnDef', 'TypeDef', 'TypeConstrDef', 'VarDef', 'ArgDef',
+           'FunDef', 'UnknownDef', 'Scope', 'Context',
+           'Diagnostic', 'Level', 'Issuer',
+           'InvalidSyntax', 'UndefinedRule', 'RedefinedRule', 'NoStartRule',
+           'EmptyRange', 'ArityMismatch', 'UndefinedName', 'RedefinedName',
+           'InvalidType', 'InvalidLitValue', 'InvalidFormat', 'UndefinedNonlocal',
+           'NotAssignable', 'UnsupportedFeature']
 
 
-class Type:
+class Type(ABC):
     """(Compile-time) Type."""
 
-    @property
-    def ast(self) -> ast.expr:
-        """The AST representation of this type."""
+    @abstractmethod
+    def to_runtime(self, rt: str) -> ast.expr:
+        """Convert to runtime type."""
         raise NotImplementedError()
 
 
-@dataclass
+@dataclass(frozen=True)
 class AnyType(Type):
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('AnyType')
+    """Do-not-care type."""
+
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.AnyType')
 
 
-@dataclass
+@dataclass(frozen=True)
 class TypeName(Type):
     """Builtin-type, or type alias reference."""
     name: str
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call('rt.BuiltinType', ast.Name(self.name))
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.BuiltinType', ast.Name(self.name))
 
 
-@dataclass
+@dataclass(frozen=True)
 class LangType(Type):
     lang: Lang
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('LangType')
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.LangType')
 
 
-@dataclass
+@dataclass(frozen=True)
 class RefinedType(Type):
     base: Type
     predicate: ast.expr
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('RefinedType', self.base.ast, self.predicate)
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.RefinedType', self.base.to_runtime(rt), self.predicate)
 
 
 type LitValue = str | bytes | bool | int | float | complex | None | EllipsisType
 
 
-@dataclass
+@dataclass(frozen=True)
 class LitType(Type):
     values: Sequence[LitValue]
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('LitType', ast.List([ast.Constant(v) for v in self.values]))
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.LitType', ast.List([ast.Constant(v) for v in self.values]))
 
 
 none_type = LitType([None])
 
 
-@dataclass
+@dataclass(frozen=True)
 class UnionType(Type):
     options: Sequence[Type]
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('UnionType', ast.List([t.ast for t in self.options]))
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.UnionType', ast.List([t.to_runtime(rt) for t in self.options]))
 
 
-@dataclass
+@dataclass(frozen=True)
 class TupleType(Type):
     elements: Sequence[Type]
     variant: bool = False
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('TupleType', ast.List([t.ast for t in self.elements]))
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.TupleType', ast.List([t.to_runtime(rt) for t in self.elements]))
 
 
-@dataclass
-class SeqType(Type):
-    element: Type
-
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('SeqType', self.element.ast)
-
-
-@dataclass
+@dataclass(frozen=True)
 class ListType(Type):
     element: Type
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('ListType', self.element.ast)
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.ListType', self.element.to_runtime(rt))
 
 
-@dataclass
+@dataclass(frozen=True)
 class SetType(Type):
     element: Type
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('SetType', self.element.ast)
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.SetType', self.element.to_runtime(rt))
 
 
-@dataclass
+@dataclass(frozen=True)
 class DictType(Type):
     key: Type
     value: Type
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('DictType', self.key.ast, self.value.ast)
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.DictType', self.key.to_runtime(rt), self.value.to_runtime(rt))
 
 
-@dataclass
+@dataclass(frozen=True)
 class ClassType(Type):
     id: str
     fields: dict[str, Type]
 
-    @property
-    def ast(self) -> ast.expr:
-        return mk_call_rt('ClassType', ast.Constant(self.id),
-                          ast.Dict([ast.Constant(k) for k in self.fields.keys()],
-                                   [v.ast for v in self.fields.values()]))
+    def to_runtime(self, rt: str) -> ast.expr:
+        return mk_call(f'{rt}.ClassType', ast.Constant(self.id),
+                       ast.Dict([ast.Constant(k) for k in self.fields.keys()],
+                                [v.to_runtime(rt) for v in self.fields.values()]))
 
 
-class Contract:
+class Contract(ABC):
     pass
 
 
-@dataclass
+@dataclass(frozen=True)
 class Require(Contract):
     cond: ast.expr  # bind to function args
     cond_tree: ast.expr
 
 
-@dataclass
+@dataclass(frozen=True)
 class Ensure(Contract):
     cond: ast.expr  # bind to function args and '_' (for the return value)
     cond_tree: ast.expr
 
 
-@dataclass
+@dataclass(frozen=True)
 class Def:
     """Definition at semantic level."""
     pass
 
 
-@dataclass
+@dataclass(frozen=True)
 class AnnDef(Def):
     """FLAT annotation."""
     qual_name: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class TypeDef(Def):
     """Type definition/alias."""
     expansion: Type
 
 
-@dataclass
+@dataclass(frozen=True)
 class TypeConstrDef(Def):
     """Type constructor definition."""
     id: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class VarDef(Def):
     """Variable definition."""
     typ: Type
 
 
-@dataclass
+@dataclass(frozen=True)
 class ArgDef(VarDef):
     """Function argument definition."""
     kind: Literal['posonly', 'normal', '*', 'kwonly', '**']
     default: ast.expr | None
 
 
-@dataclass
+@dataclass(frozen=True)
 class FunDef(Def):
     args: Sequence[str]
     return_type: Type
@@ -233,6 +223,64 @@ class Scope:
         key = f"__fresh_{self._next_fresh}__"
         self._next_fresh += 1
         return key
+
+
+class Level(Enum):
+    """Diagnostic level."""
+    ERROR = 1
+    WARN = 2
+
+    def __str__(self) -> str:
+        return self.name
+
+
+@dataclass(frozen=True)
+class Diagnostic:
+    file_path: str
+    pos: Range
+    summary: str
+    detail: str = ''
+    level: Level = Level.ERROR
+
+
+class Issuer:
+    """Diagnostic collector."""
+
+    def __init__(self) -> None:
+        self._diagnostics: list[Diagnostic] = []
+
+    def issue(self, diagnostic: Diagnostic) -> None:
+        """Add a diagnostic."""
+        self._diagnostics.append(diagnostic)
+
+    @property
+    def has_diagnostics(self) -> bool:
+        """Test if there are any diagnostics."""
+        return len(self._diagnostics) > 0
+
+    @property
+    def has_errors(self) -> bool:
+        """Test if there are any ERROR-level diagnostics."""
+        return any(d.level == Level.ERROR for d in self._diagnostics)
+
+    def get_diagnostics(self) -> Sequence[Diagnostic]:
+        """Get all diagnostics."""
+        return self._diagnostics
+
+    def pretty(self) -> str:
+        """Pretty-print all diagnostics."""
+        lines = []
+        for d in self._diagnostics:
+            prefix = "ERROR" if d.level == Level.ERROR else "WARN"
+            loc_str = f"{d.pos}" if d.pos else "<unknown location>"
+            lines.append(f"{loc_str} - {prefix}: {d.summary}")
+        return "\n".join(lines)
+
+    def print(self) -> None:
+        """Pretty-print all diagnostics."""
+        for diagnostic in self._diagnostics:
+            print(f"-- {diagnostic.level}: {diagnostic.summary}", file=sys.stderr)
+            print_details(diagnostic.file_path, diagnostic.pos, [])
 
 
 class Context:
@@ -303,13 +351,77 @@ class Context:
     def issue(self, diagnostic: Diagnostic) -> None:
         self.issuer.issue(diagnostic)
 
-    def get_loc(self, node: ast.AST) -> Location:
-        if hasattr(node, 'lineno') and hasattr(node, 'col_offset'):
-            start = Position(node.lineno, node.col_offset + 1)
-            if hasattr(node, 'end_lineno') and hasattr(node, 'end_col_offset'):
-                end = Position(node.end_lineno, node.end_col_offset + 1)
-            else:
-                end = start
-            return Location(self.file_path, Range(start, end))
+    @DeprecationWarning
+    def get_loc(self, node: ast.AST) -> Any:
+        raise NotImplementedError
 
-        raise ValueError("AST node does not have position information.")
+
+# Instances of specific diagnostics:
+class InvalidSyntax(Diagnostic):
+    def __init__(self, detail: str, file_path: str, pos: Range) -> None:
+        super().__init__(file_path, pos, "invalid syntax", detail)
+
+
+class UndefinedRule(Diagnostic):
+    def __init__(self, file_path: str, rule_pos: Range) -> None:
+        super().__init__(file_path, rule_pos, "undefined rule")
+
+
+class RedefinedRule(Diagnostic):
+    def __init__(self, file_path: str, rule_pos: Range) -> None:
+        super().__init__(file_path, rule_pos, "undefined rule")
+
+
+class NoStartRule(Diagnostic):
+    def __init__(self, file_path: str, grammar_pos: Range) -> None:
+        super().__init__(file_path, grammar_pos, "no 'start' rule")
+
+
+class EmptyRange(Diagnostic):
+    def __init__(self, file_path: str, range_pos: Range) -> None:
+        super().__init__(file_path, range_pos, "empty range", level=Level.WARN)
+
+
+class ArityMismatch(Diagnostic):
+    def __init__(self, expected: int | str, actual: int, file_path: str, fun_pos: Range) -> None:
+        super().__init__(file_path, fun_pos, "arity mismatch", f"expected {expected} argument(s), but got {actual}")
+
+
+class UndefinedName(Diagnostic):
+    def __init__(self, file_path: str, name_pos: Range) -> None:
+        super().__init__(file_path, name_pos, "undefined name")
+
+
+class RedefinedName(Diagnostic):
+    def __init__(self, file_path: str, name_pos: Range) -> None:
+        super().__init__(file_path, name_pos, "redefined name")
+
+
+class InvalidType(Diagnostic):
+    def __init__(self, file_path: str, type_pos: Range) -> None:
+        super().__init__(file_path, type_pos, "invalid type")
+
+
+class InvalidLitValue(Diagnostic):
+    def __init__(self, file_path: str, value_pos: Range) -> None:
+        super().__init__(file_path, value_pos, "invalid literal value for 'typing.Literal'")
+
+
+class InvalidFormat(Diagnostic):
+    def __init__(self, file_path: str, format_pos: Range) -> None:
+        super().__init__(file_path, format_pos, "invalid grammar format")
+
+
+class UndefinedNonlocal(Diagnostic):
+    def __init__(self, file_path: str, name_pos: Range) -> None:
+        super().__init__(file_path, name_pos, "undefined nonlocal", "this is not defined in any enclosing scope")
+
+
+class NotAssignable(Diagnostic):
+    def __init__(self, file_path: str, target_pos: Range) -> None:
+        super().__init__(file_path, target_pos, "not assignable", "cannot assign to this target")
+
+
+class UnsupportedFeature(Diagnostic):
+    def __init__(self, file_path: str, pos: Range) -> None:
+        super().__init__(file_path, pos, "unsupported feature")

@@ -6,7 +6,6 @@ from typing import Mapping
 from flat.backend.lang import NT, Lang
 from flat.py.analyzer import analyze_lang, analyze
 from flat.py.compile_time import *
-from flat.py.diagnostics import *
 
 
 class TestAnalyzeLang(unittest.TestCase):

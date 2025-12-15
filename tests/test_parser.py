@@ -1,7 +1,7 @@
 import unittest
 from typing import Sequence
 
-from flat.py.diagnostics import InvalidSyntax
+from flat.py.compile_time import InvalidSyntax
 from flat.py.grammar import *
 from flat.py.parser import parse
 
@@ -17,8 +17,8 @@ class Base(unittest.TestCase):
 
     def assert_error(self, actual: Grammar | InvalidSyntax, msg_contains: str) -> None:
         if isinstance(actual, InvalidSyntax):
-            if msg_contains not in actual.msg:
-                self.fail(f"Actual message does not contain '{msg_contains}': {actual.msg}")
+            if msg_contains not in actual.detail:
+                self.fail(f"Actual message does not contain '{msg_contains}': {actual.detail}")
         else:
             self.fail(f"Expected error, but got grammar: {actual}")
 

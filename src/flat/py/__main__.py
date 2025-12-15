@@ -5,7 +5,7 @@ from argparse import ArgumentParser
 from typing import Sequence
 
 from flat.py.checker import check
-from flat.py.diagnostics import Issuer
+from flat.py.compile_time import Issuer
 
 
 def run(in_paths: Sequence[str], out_dir: str) -> None:
@@ -26,7 +26,7 @@ def run(in_paths: Sequence[str], out_dir: str) -> None:
                     process_file(os.path.abspath(entry_path), issuer, out_dir)
 
         if issuer.has_diagnostics:
-            print(issuer.pretty(), file=sys.stderr)
+            issuer.print()
 
 
 def process_file(file_path: str, issuer: Issuer, out_dir: str) -> None:

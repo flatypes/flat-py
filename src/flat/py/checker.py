@@ -4,8 +4,8 @@ from typing import Sequence
 from flat.py.analyzer import analyze
 from flat.py.ast_helpers import *
 from flat.py.compile_time import *
-from flat.py.diagnostics import *
-from flat.py.runtime import SOURCE, LINENO, get_range
+from flat.py.runtime import SOURCE, LINENO
+from flat.py.shared import get_range
 
 __all__ = ['check']
 
@@ -109,7 +109,7 @@ class Checker(ast.NodeTransformer):
         self.ctx.push(fun, defs=dict(args))
         self._check_body(node.body, body)
         self.ctx.pop()
-        return ast.FunctionDef(node.name, erase_arguments_ann(node.args), body, list(other_decorators), None, None, [])
+        return ast.FunctionDef(node.name, erase_ann(node.args), body, list(other_decorators), None, None, [])
 
     def _resolve_arguments(self, node: ast.arguments) -> Sequence[tuple[str, ArgDef]]:
         args: list[tuple[str, ArgDef]] = []
@@ -153,17 +153,35 @@ class Checker(ast.NodeTransformer):
                             raise NotImplementedError
                         case AnnDef('flat.py.requires'):
                             for arg in args:
-                                contracts.append(Require(to_expr(arg), arg))
+                                match arg:
+                                    case ast.Constant(str() as cond_code):
+                                        cond = ast.parse(cond_code, mode='eval').body
+                                        contracts.append(Require(cond, arg))
+                                    case _:
+                                        self.ctx.issue(InvalidSyntax("'requires' expects a string literal",
+                                                                     self.ctx.file_path, get_range(arg)))
                         case AnnDef('flat.py.ensures'):
                             for arg in args:
-                                contracts.append(Ensure(to_expr(arg), arg))
+                                match arg:
+                                    case ast.Constant(str() as cond_code):
+                                        cond = ast.parse(cond_code, mode='eval').body
+                                        contracts.append(Ensure(cond, arg))
+                                    case _:
+                                        self.ctx.issue(InvalidSyntax("'ensures' expects a string literal",
+                                                                     self.ctx.file_path, get_range(arg)))
                         case AnnDef('flat.py.returns'):
                             if len(args) == 1:
                                 arg = args[0]
-                                contracts.append(Ensure(mk_eq(ast.Name('_'), to_expr(arg)), decorator))
+                                match arg:
+                                    case ast.Constant(str() as cond_code):
+                                        value = ast.parse(cond_code, mode='eval').body
+                                        contracts.append(Ensure(mk_eq(ast.Name('_'), value), decorator))
+                                    case _:
+                                        self.ctx.issue(InvalidSyntax("'returns' expects a string literal",
+                                                                     self.ctx.file_path, get_range(arg)))
                             else:
-                                self.ctx.issue(ArityMismatch("annotation 'returns'", 1, len(args),
-                                                             self.ctx.get_loc(decorator)))
+                                self.ctx.issue(ArityMismatch(1, len(args),
+                                                             self.ctx.file_path, get_range(decorator)))
                         case _:
                             others.append(decorator)
                 case _:
@@ -187,7 +205,7 @@ class Checker(ast.NodeTransformer):
             default = ast.Constant(None)
         else:
             default = self._mk_range(default)
-        body.append(ast.Expr(mk_call(f'{self.rt}.check_arg_type', actual, expected.ast,
+        body.append(ast.Expr(mk_call(f'{self.rt}.check_arg_type', actual, expected.to_runtime(self.rt),
                                      position, keyword, default)))
 
     def _mk_range(self, node: ast.AST) -> ast.expr:
@@ -206,7 +224,7 @@ class Checker(ast.NodeTransformer):
         body: list[ast.stmt] = []
         return_value = node.value if node.value else ast.Constant(None)
         body.append(mk_assign('_', return_value))
-        self._check_type('_', fun.return_type, node.value, body)
+        self._check_type('_', fun.return_type, node.value if node.value else node, body)
 
         # Post-check: contracts
         for contract in fun.contracts:
@@ -218,18 +236,18 @@ class Checker(ast.NodeTransformer):
         body.append(ast.Return(ast.Name('_')))
         return body
 
-    def _check_type(self, actual: str | ast.expr, expected: Type, actual_tree: ast.expr, body: list[ast.stmt]) -> None:
+    def _check_type(self, actual: str | ast.expr, expected: Type, actual_tree: ast.AST, body: list[ast.stmt]) -> None:
         match expected:
             case AnyType():
                 pass
             case _:
                 if isinstance(actual, str):
                     actual = ast.Name(actual)
-                elif not pure(actual):
+                elif not is_pure(actual):
                     x = self.ctx.fresh()
                     body.append(mk_assign(x, actual))
                     actual = ast.Name(x)
-                body.append(ast.Expr(mk_call(f'{self.rt}.check_type', actual, expected.ast,
+                body.append(ast.Expr(mk_call(f'{self.rt}.check_type', actual, expected.to_runtime(self.rt),
                                              self._mk_range(actual_tree))))
 
     def _check_post(self, cond: ast.expr, cond_tree: ast.expr, return_tree: ast.stmt, body: list[ast.stmt]) -> None:
@@ -245,7 +263,7 @@ class Checker(ast.NodeTransformer):
                     d = known.get(alias.name, UnknownDef())
                     self.ctx[x] = d
                 case _:
-                    self.ctx.issue(RedefinedName(x, self.ctx.get_loc(alias)))
+                    self.ctx.issue(RedefinedName(self.ctx.file_path, get_range(alias)))
 
         return node
 
@@ -263,7 +281,7 @@ class Checker(ast.NodeTransformer):
         for name in node.names:
             match self.ctx.lookup_nonlocal(name):
                 case None:
-                    self.ctx.issue(UndefinedNonlocal(name, self.ctx.get_loc(node)))
+                    self.ctx.issue(UndefinedNonlocal(self.ctx.file_path, get_range(node)))
                 case d:
                     self.ctx[name] = d
 
@@ -281,7 +299,7 @@ class Checker(ast.NodeTransformer):
             case None:
                 self.ctx[target.id] = d
             case _:
-                self.ctx.issue(RedefinedName(target.id, self.ctx.get_loc(target)))
+                self.ctx.issue(RedefinedName(self.ctx.file_path, get_range(target)))
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> list[ast.stmt]:
         body: list[ast.stmt] = [node]
@@ -296,9 +314,9 @@ class Checker(ast.NodeTransformer):
                     if node.value:  # assignment
                         self._check_type(x, d.typ, node.value, body)
                 else:
-                    self.ctx.issue(RedefinedName(x, self.ctx.get_loc(node.target)))
+                    self.ctx.issue(RedefinedName(self.ctx.file_path, get_range(node.target)))
             case e, a:  # ignore annotation and regard it as assignment
-                # self.ctx.issue(IgnoredAnnot(self.ctx.get_loc(node.annotation)))
+                # self.ctx.issue(IgnoredAnnot(self.ctx.file_path, get_range(node.annotation)))
                 if node.value:
                     self._check_left_value(e, body)
         return body
@@ -308,13 +326,13 @@ class Checker(ast.NodeTransformer):
             case ast.Name(x):
                 match self.ctx.lookup(x):
                     case None:
-                        self.ctx.issue(UndefinedName(x, self.ctx.get_loc(value)))
+                        self.ctx.issue(UndefinedName(self.ctx.file_path, get_range(value)))
                         return None
                     case VarDef(tx):
                         self._check_type(x, tx, value, body)
                         return tx
                     case _:
-                        self.ctx.issue(NotAssignable(x, self.ctx.get_loc(value)))
+                        self.ctx.issue(NotAssignable(self.ctx.file_path, get_range(value)))
                         return None
             case ast.Attribute(e, x):
                 t = self._check_left_value(e, body)

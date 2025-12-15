@@ -5,8 +5,9 @@ from typing import FrozenSet
 
 from parsy import Parser, Result, ParseError, line_info_at, seq, alt, forward_declaration
 
-from flat.py.diagnostics import Position, Range, Location, InvalidSyntax
+from flat.py.compile_time import InvalidSyntax
 from flat.py.grammar import *
+from flat.py.shared import Range
 
 __all__ = ['grammar_formats', 'parse']
 
@@ -14,10 +15,8 @@ grammar_formats: FrozenSet[str] = frozenset(['ebnf', 'regex'])
 
 
 def parse(source: str,
-          *,
-          grammar_format: str = 'ebnf',
-          file_path: str = '<unknown>',
-          start_pos: Position = Position(0, 0)) -> Grammar | InvalidSyntax:
+          *, grammar_format: str = 'ebnf',
+          file_path: str = '<unknown>', start_row: int = 0, start_col_offset: int = 0) -> Grammar | InvalidSyntax:
     """Parse a grammar in the given format."""
     match grammar_format:
         case 'ebnf':
@@ -48,9 +47,9 @@ def parse(source: str,
         else:
             msg = f"expected one of {', '.join(expected_list)}"
 
-        pos = start_pos + line_info_at(source, err.index)
-        loc = Location(file_path, Range(pos, pos))
-        return InvalidSyntax(msg, loc)
+        x, y = line_info_at(source, err.index)
+        pos = Range.at(start_row + x, start_col_offset + y)
+        return InvalidSyntax(msg, file_path, pos)
 
 
 def expect(s: str) -> Parser:
@@ -175,12 +174,12 @@ class ExprParser(ABC):
         @Parser
         def set_loc_parser(source: str, offset: int) -> Result:
             offset = self.skip_whitespace(source, offset)
-            start = Position(*line_info_at(source, offset))
+            start_row, start_col_offset = line_info_at(source, offset)
             result = p(source, offset)
             if result.status:
-                end = Position(*line_info_at(source, result.index - 1))
-                loc = Location(self.file_path, Range(start, end))
-                setattr(result.value, 'loc', loc)
+                end_row, end_col_offset = line_info_at(source, result.index)
+                pos = Range(start_row + 1, end_row + 1, start_col_offset, end_col_offset)
+                setattr(result.value, 'pos', pos)
                 return Result.success(result.index, result.value)
 
             return result

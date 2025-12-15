@@ -4,7 +4,7 @@ from textwrap import dedent
 from typing import cast
 
 from flat.py.checker import check
-from flat.py.diagnostics import Issuer
+from flat.py.compile_time import Issuer
 
 
 def parse_module(code: str) -> ast.Module:

@@ -13,7 +13,8 @@ from flat.backend.lang import Lang
 
 __all__ = ['Type', 'BuiltinType', 'LangType', 'RefinedType', 'LitType',
            'UnionType', 'TupleType', 'ListType', 'SetType', 'DictType',
-           'SOURCE', 'LINENO', 'check_arg_type', 'check_pre', 'check_type', 'check_post']
+           'Range', 'get_range', 'SOURCE', 'LINENO',
+           'check_arg_type', 'check_pre', 'check_type', 'check_post']
 
 
 ## Types ##

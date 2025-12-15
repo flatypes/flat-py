@@ -1,7 +1,7 @@
 from typing import Literal
 
 
-def f(x: Literal['a', 'b']) -> str:
+def f(x: Literal['a', 'b']) -> Literal['b', 'c']:
     return chr(ord(x) + 1)
 
 
@@ -14,9 +14,14 @@ def h(x: str) -> Literal['a']:
 
 
 def test(x: int) -> None:
-    y1: Literal['ac'] = f('a') + f('b')
-    y2 = ord(f('c')) + g(0)
-    y3 = h('b')
+    y1: Literal['bc'] = f('a') + f('b')
+    y2: Literal['bb'] = f('a') + f('b')
+    y3 = ord(f('c')) + g(0)
+    y4 = h('b')
 
 
 test(0)
+
+
+def f1(x: Literal[True, f]) -> Literal[False, None]:
+    return None if x else False
