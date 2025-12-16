@@ -39,47 +39,47 @@ class TestAnalyzeLang(unittest.TestCase):
             self.fail(f"Expected {typ.__name__}, but got {type(diagnostics[0]).__name__}")
 
     def test_char_class(self) -> None:
-        actual = analyze_lang('[a-c+*]', self.ctx, grammar_format='regex')
+        actual = analyze_lang('[a-c+*]', self.ctx, syntax='regex')
         self.assert_equal(actual, {'start': [[NT('@1')]], '@1': [['a'], ['b'], ['c'], ['+'], ['*']]})
 
     def test_empty_char_range(self) -> None:
-        actual = analyze_lang('[ad-b]', self.ctx, grammar_format='regex')
+        actual = analyze_lang('[ad-b]', self.ctx, syntax='regex')
         self.assert_diagnostic(EmptyRange)
         self.assert_equal(actual, {'start': [['a']]})
 
     def test_union(self) -> None:
-        actual = analyze_lang('a|b|c', self.ctx, grammar_format='regex')
+        actual = analyze_lang('a|b|c', self.ctx, syntax='regex')
         self.assert_equal(actual, {'start': [['a'], ['b'], ['c']]})
 
     def test_nested_union(self) -> None:
-        actual = analyze_lang('x(a|b)', self.ctx, grammar_format='regex')
+        actual = analyze_lang('x(a|b)', self.ctx, syntax='regex')
         self.assert_equal(actual, {'start': [['x', NT('@1')]], '@1': [['a'], ['b']]})
 
     def test_star(self) -> None:
-        actual = analyze_lang('a*', self.ctx, grammar_format='regex')
+        actual = analyze_lang('a*', self.ctx, syntax='regex')
         self.assert_equal(actual, {'start': [[NT('@1')]], '@1': [[], ['a', NT('@1')]]})
 
     def test_plus(self) -> None:
-        actual = analyze_lang('ab+', self.ctx, grammar_format='regex')
+        actual = analyze_lang('ab+', self.ctx, syntax='regex')
         self.assert_equal(actual, {'start': [['a', NT('@1')]], '@1': [['b'], ['b', NT('@1')]]})
 
     def test_optional(self) -> None:
-        actual = analyze_lang('a?b', self.ctx, grammar_format='regex')
+        actual = analyze_lang('a?b', self.ctx, syntax='regex')
         self.assert_equal(actual, {'start': [[NT('@1'), 'b']], '@1': [[], ['a']]})
 
     def test_power(self) -> None:
-        actual = analyze_lang('a{3}b{1}c{0}', self.ctx, grammar_format='regex')
+        actual = analyze_lang('a{3}b{1}c{0}', self.ctx, syntax='regex')
         self.assert_equal(actual, {'start': [['a', 'a', 'a', 'b']]})
 
     def test_loop(self) -> None:
-        actual = analyze_lang('a{2,4}b{3,}c{,2}', self.ctx, grammar_format='regex')
+        actual = analyze_lang('a{2,4}b{3,}c{,2}', self.ctx, syntax='regex')
         self.assert_equal(actual, {'start': [['a', 'a', NT('@1'), 'b', 'b', 'b', NT('@2'), NT('@3')]],
                                    '@1': [[], ['a'], ['a', 'a']],
                                    '@2': [[], ['b', NT('@2')]],
                                    '@3': [[], ['c'], ['c', 'c']]})
 
     def test_empty_loop_range(self) -> None:
-        actual = analyze_lang('ab{5,3}', self.ctx, grammar_format='regex')
+        actual = analyze_lang('ab{5,3}', self.ctx, syntax='regex')
         self.assert_diagnostic(EmptyRange)
         self.assert_equal(actual, {'start': [['a']]})
 
@@ -107,12 +107,12 @@ class TestAnalyze(unittest.TestCase):
     def test_name_builtin(self) -> None:
         annot = parse_expr('str')
         actual = analyze(annot, mk_ctx())
-        self.assertEqual(actual, TypeName('str'))
+        self.assertEqual(actual, BuiltinType('str'))
 
     def test_name_alias(self) -> None:
         annot = parse_expr('Word')
-        actual = analyze(annot, mk_ctx({'Word': TypeDef(TypeName('str'))}))
-        self.assertEqual(actual, TypeName('str'))
+        actual = analyze(annot, mk_ctx({'Word': TypeDef(BuiltinType('str'))}))
+        self.assertEqual(actual, BuiltinType('str'))
 
     def test_none_type(self) -> None:
         annot = parse_expr('None')
@@ -125,7 +125,7 @@ class TestAnalyze(unittest.TestCase):
         self.assertEqual(actual, LangType({'start': [['a']]}))
 
     def test_lang_regex(self) -> None:
-        annot = parse_expr("lang('a', format='regex')")
+        annot = parse_expr("lang('a', syntax='regex')")
         actual = analyze(annot, mk_ctx({'lang': TypeConstrDef('flat.py.lang')}))
         self.assertEqual(actual, LangType({'start': [['a']]}))
 
@@ -133,49 +133,31 @@ class TestAnalyze(unittest.TestCase):
         annot = parse_expr("refine(str, 'len(_) < 5')")
         actual = analyze(annot, mk_ctx({'refine': TypeConstrDef('flat.py.refine')}))
         assert isinstance(actual, RefinedType)
-        self.assertEqual(actual.base, TypeName('str'))
-        self.assertEqual(ast.unparse(actual.predicate), 'lambda _: len(_) < 5')
+        self.assertEqual(actual.base, BuiltinType('str'))
+        self.assertEqual(ast.unparse(actual.conds[0]), 'len(_) < 5')
 
     def test_tuple_type(self) -> None:
         annot = parse_expr('tuple[int, str, float]')
         actual = analyze(annot, mk_ctx())
-        expected = TupleType([TypeName('int'), TypeName('str'), TypeName('float')])
-        self.assertEqual(actual, expected)
-
-    def test_raw_tuple_type(self) -> None:
-        annot = parse_expr('tuple')
-        actual = analyze(annot, mk_ctx())
-        expected = TupleType([AnyType()], variant=True)
+        expected = TupleType([BuiltinType('int'), BuiltinType('str'), BuiltinType('float')])
         self.assertEqual(actual, expected)
 
     def test_list_type(self) -> None:
         annot = parse_expr('List[str]')
         actual = analyze(annot, mk_ctx({'List': TypeConstrDef('list')}))
-        expected = ListType(TypeName('str'))
-        self.assertEqual(actual, expected)
-
-    def test_raw_list_type(self) -> None:
-        annot = parse_expr('list')
-        actual = analyze(annot, mk_ctx())
-        expected = ListType(AnyType())
+        expected = ListType(BuiltinType('str'))
         self.assertEqual(actual, expected)
 
     def test_set_type(self) -> None:
         annot = parse_expr('set[int]')
         actual = analyze(annot, mk_ctx())
-        expected = SetType(TypeName('int'))
-        self.assertEqual(actual, expected)
-
-    def test_raw_set_type(self) -> None:
-        annot = parse_expr('set')
-        actual = analyze(annot, mk_ctx())
-        expected = SetType(AnyType())
+        expected = SetType(BuiltinType('int'))
         self.assertEqual(actual, expected)
 
     def test_dict_type(self) -> None:
         annot = parse_expr('dict[str, int]')
         actual = analyze(annot, mk_ctx())
-        expected = DictType(TypeName('str'), TypeName('int'))
+        expected = DictType(BuiltinType('str'), BuiltinType('int'))
         self.assertEqual(actual, expected)
 
     def test_literal_type(self) -> None:
@@ -193,11 +175,11 @@ class TestAnalyze(unittest.TestCase):
     def test_union_type(self) -> None:
         annot = parse_expr('int | str | float')
         actual = analyze(annot, mk_ctx())
-        expected = UnionType([TypeName('int'), TypeName('str'), TypeName('float')])
+        expected = UnionType([BuiltinType('int'), BuiltinType('str'), BuiltinType('float')])
         self.assertEqual(actual, expected)
 
     def test_optional_type(self) -> None:
         annot = parse_expr('Optional[str]')
         actual = analyze(annot, mk_ctx({'Optional': TypeConstrDef('typing.Optional')}))
-        expected = UnionType([TypeName('str'), none_type])
+        expected = UnionType([BuiltinType('str'), none_type])
         self.assertEqual(actual, expected)

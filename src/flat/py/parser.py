@@ -9,22 +9,21 @@ from flat.py.compile_time import InvalidSyntax
 from flat.py.grammar import *
 from flat.py.shared import Range
 
-__all__ = ['grammar_formats', 'parse']
+__all__ = ['LANG_SYNTAX', 'parse']
 
-grammar_formats: FrozenSet[str] = frozenset(['ebnf', 'regex'])
+LANG_SYNTAX: FrozenSet[str] = frozenset(['ebnf', 'regex'])
 
 
-def parse(source: str,
-          *, grammar_format: str = 'ebnf',
-          file_path: str = '<unknown>', start_row: int = 0, start_col_offset: int = 0) -> Grammar | InvalidSyntax:
+def parse(source: str, *, syntax: str = 'ebnf',
+          file_path: str = '<unknown>', start: tuple[int, int] = (0, 0)) -> Grammar | InvalidSyntax:
     """Parse a grammar in the given format."""
-    match grammar_format:
+    match syntax:
         case 'ebnf':
-            parser = EBNFParser(file_path, angled=True).grammar()
+            parser = EBNFParser(True, file_path, start).grammar()
         case 'regex':
-            parser = RegexParser(file_path).grammar()
+            parser = RegexParser(file_path, start).grammar()
         case _:
-            raise ValueError(f"unknown grammar format: {grammar_format!r}")
+            raise ValueError(f"unknown grammar format: {syntax!r}")
 
     try:
         return parser.parse(source)
@@ -39,17 +38,16 @@ def parse(source: str,
                 messages.append(s)
 
         if len(messages) == 1:
-            msg = messages[0]
+            detail = messages[0]
         elif len(messages) > 1:
             assert False, "multiple error messages"
         elif len(expected_list) == 1:
-            msg = f"expected {expected_list[0]}"
+            detail = f"expected {expected_list[0]}"
         else:
-            msg = f"expected one of {', '.join(expected_list)}"
+            detail = f"expected one of {', '.join(expected_list)}"
 
-        x, y = line_info_at(source, err.index)
-        pos = Range.at(start_row + x, start_col_offset + y)
-        return InvalidSyntax(msg, file_path, pos)
+        pos = Range.at(*(line_info_at(source, err.index))) >> start
+        return InvalidSyntax(detail, file_path, pos)
 
 
 def expect(s: str) -> Parser:
@@ -129,9 +127,10 @@ def char_seq(special: str) -> Parser:
 
 
 class ExprParser(ABC):
-    def __init__(self, file_path: str, whitespace: str) -> None:
-        self.file_path = file_path
+    def __init__(self, whitespace: str, file_path: str, start: tuple[int, int]) -> None:
         self.whitespace = whitespace
+        self.file_path = file_path
+        self.start = start
 
     def skip_whitespace(self, source: str, offset: int) -> int:
         while offset < len(source) and source[offset] in self.whitespace:
@@ -170,28 +169,28 @@ class ExprParser(ABC):
 
         return regex_parser
 
-    def set_loc(self, p: Parser) -> Parser:
+    def set_pos(self, p: Parser) -> Parser:
         @Parser
-        def set_loc_parser(source: str, offset: int) -> Result:
+        def set_pos_parser(source: str, offset: int) -> Result:
             offset = self.skip_whitespace(source, offset)
             start_row, start_col_offset = line_info_at(source, offset)
             result = p(source, offset)
             if result.status:
                 end_row, end_col_offset = line_info_at(source, result.index)
-                pos = Range(start_row + 1, end_row + 1, start_col_offset, end_col_offset)
+                pos = Range(start_row + 1, end_row + 1, start_col_offset, end_col_offset) >> self.start
                 setattr(result.value, 'pos', pos)
                 return Result.success(result.index, result.value)
 
             return result
 
-        return set_loc_parser
+        return set_pos_parser
 
     def char_class(self) -> Parser:
         mode = expect('^').result('exclusive').optional('inclusive')
         literal = char('[]-')
-        range = self.set_loc(seq(literal, expect('-') >> literal).combine(CharRange))
-        items = (range | literal).at_least(1)
-        return self.set_loc(self.literal('[') >> seq(mode, items).combine(CharClass) << expect(']'))
+        char_range = self.set_pos(seq(literal, expect('-') >> literal).combine(CharRange))
+        items = (char_range | literal).at_least(1)
+        return self.set_pos(self.literal('[') >> seq(mode, items).combine(CharClass) << expect(']'))
 
     @abstractmethod
     def atomic(self) -> Parser:
@@ -199,7 +198,7 @@ class ExprParser(ABC):
 
     def expr(self) -> Parser:
         num = self.regex('[0-9]+', 'number').map(int)
-        range = self.set_loc(self.brace(seq(num.optional(0), self.literal(',') >> num.optional()).combine(NatRange)))
+        range = self.set_pos(self.brace(seq(num.optional(0), self.literal(',') >> num.optional()).combine(NatRange)))
         postfix_op = alt(self.literal('*').result(Star),
                          self.literal('+').result(Plus),
                          self.literal('?').result(Optional),
@@ -208,42 +207,42 @@ class ExprParser(ABC):
 
         parser = forward_declaration()
         base = self.atomic() | self.paren(parser)
-        element = self.set_loc(seq(base, postfix_op.optional()).combine(lambda e, f: f(e) if f else e))
-        concat = self.set_loc(element.at_least(1).map(lambda es: es[0] if len(es) == 1 else Concat(es)))
-        union = self.set_loc(concat.sep_by(self.literal('|'), min=1
+        element = self.set_pos(seq(base, postfix_op.optional()).combine(lambda e, f: f(e) if f else e))
+        concat = self.set_pos(element.at_least(1).map(lambda es: es[0] if len(es) == 1 else Concat(es)))
+        union = self.set_pos(concat.sep_by(self.literal('|'), min=1
                                            ).map(lambda es: es[0] if len(es) == 1 else Union(es)))
         parser.become(union)
         return parser
 
 
 class EBNFParser(ExprParser):
-    def __init__(self, file_path: str, angled: bool) -> None:
-        super().__init__(file_path, string.whitespace)
+    def __init__(self, angled: bool, file_path: str, start: tuple[int, int]) -> None:
+        super().__init__(string.whitespace, file_path, start)
         self.angled = angled
 
     def symbol(self) -> Parser:
-        symbol = self.set_loc(self.regex('[A-Za-z0-9_-]+', 'identifier').map(Ref))
+        symbol = self.set_pos(self.regex('[A-Za-z0-9_-]+', 'identifier').map(Ref))
         if self.angled:
-            symbol |= self.set_loc(self.regex('<[A-Za-z0-9_-]+>', 'identifier').map(lambda s: Ref(s[1:-1])))
+            symbol |= self.set_pos(self.regex('<[A-Za-z0-9_-]+>', 'identifier').map(lambda s: Ref(s[1:-1])))
         return symbol
 
     def atomic(self) -> Parser:
         single_quote = self.literal("'") >> char_seq("'") << expect("'")
         double_quote = self.literal('"') >> char_seq('"') << expect('"')
-        constant = self.set_loc((single_quote | double_quote).map(Lit))
+        constant = self.set_pos((single_quote | double_quote).map(Lit))
         return constant | self.char_class() | self.symbol()
 
     def grammar(self) -> Parser:
-        rule = self.set_loc(seq(self.symbol(), self.literal(':') >> self.expr() << self.literal(';')).combine(Rule))
+        rule = self.set_pos(seq(self.symbol(), self.literal(':') >> self.expr() << self.literal(';')).combine(Rule))
         return rule.at_least(1) << self.literal('')
 
 
 class RegexParser(ExprParser):
-    def __init__(self, file_path: str) -> None:
-        super().__init__(file_path, '')
+    def __init__(self, file_path: str, start: tuple[int, int]) -> None:
+        super().__init__('', file_path, start)
 
     def atomic(self) -> Parser:
-        constant = self.set_loc(char('.^$*+?{}[]()|').map(Lit))
+        constant = self.set_pos(char('.^$*+?{}[]()|').map(Lit))
         return constant | self.char_class()
 
     def grammar(self) -> Parser:

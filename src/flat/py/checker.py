@@ -4,6 +4,7 @@ from typing import Sequence
 from flat.py.analyzer import analyze
 from flat.py.ast_helpers import *
 from flat.py.compile_time import *
+from flat.py.compile_time import InvalidTarget
 from flat.py.runtime import SOURCE, LINENO
 from flat.py.shared import get_range
 
@@ -59,7 +60,17 @@ class Checker(ast.NodeTransformer):
                 raise TypeError(f"Invalid output {type(out)}")
 
     def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
-        raise NotImplementedError
+        body: list[ast.stmt] = []
+        for stmt in node.body:
+            out = self.visit(stmt)
+            if isinstance(out, ast.stmt):
+                body.append(out)
+            elif isinstance(out, list):
+                body += out
+            else:
+                raise TypeError(f"Invalid output {type(out)}")
+
+        return ast.ClassDef(node.name, node.bases, node.keywords, body, node.decorator_list, node.type_params)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
         # Resolve signature
@@ -147,47 +158,50 @@ class Checker(ast.NodeTransformer):
         others: list[ast.expr] = []
         for decorator in decorators:
             match decorator:
-                case ast.Call(ast.Name(f), args, _):
-                    match self.ctx.lookup(f):
-                        case AnnDef('flat.py.types'):
-                            raise NotImplementedError
-                        case AnnDef('flat.py.requires'):
-                            for arg in args:
-                                match arg:
-                                    case ast.Constant(str() as cond_code):
-                                        cond = ast.parse(cond_code, mode='eval').body
-                                        contracts.append(Require(cond, arg))
-                                    case _:
-                                        self.ctx.issue(InvalidSyntax("'requires' expects a string literal",
-                                                                     self.ctx.file_path, get_range(arg)))
-                        case AnnDef('flat.py.ensures'):
-                            for arg in args:
-                                match arg:
-                                    case ast.Constant(str() as cond_code):
-                                        cond = ast.parse(cond_code, mode='eval').body
-                                        contracts.append(Ensure(cond, arg))
-                                    case _:
-                                        self.ctx.issue(InvalidSyntax("'ensures' expects a string literal",
-                                                                     self.ctx.file_path, get_range(arg)))
-                        case AnnDef('flat.py.returns'):
-                            if len(args) == 1:
-                                arg = args[0]
-                                match arg:
-                                    case ast.Constant(str() as cond_code):
-                                        value = ast.parse(cond_code, mode='eval').body
-                                        contracts.append(Ensure(mk_eq(ast.Name('_'), value), decorator))
-                                    case _:
-                                        self.ctx.issue(InvalidSyntax("'returns' expects a string literal",
-                                                                     self.ctx.file_path, get_range(arg)))
-                            else:
-                                self.ctx.issue(ArityMismatch(1, len(args),
-                                                             self.ctx.file_path, get_range(decorator)))
+                case ast.Call(ast.Name(name), _, _):
+                    match self.ctx.lookup(name):
+                        case AnnDef(annot):
+                            contracts += self._resolve_contract(annot, decorator)
                         case _:
                             others.append(decorator)
                 case _:
                     others.append(decorator)
 
         return contracts, others
+
+    def _resolve_contract(self, annot: str, call: ast.Call) -> Sequence[Contract]:
+        match annot:
+            case 'flat.py.requires' | 'flat.py.ensures':
+                contracts: list[Contract] = []
+                for arg in call.args:
+                    match arg:
+                        case ast.Constant(str() as s):
+                            cond = ast.parse(s, mode='eval').body
+                            contract = Require(cond, arg) if annot == 'flat.py.requires' else Ensure(cond, arg)
+                            contracts.append(contract)
+                        case _:
+                            self.ctx.issue(InvalidArg(annot, 'condition (a string literal)',
+                                                      self.ctx.file_path, get_range(arg)))
+                return contracts
+
+            case 'flat.py.returns':
+                if len(call.args) != 1:
+                    self.ctx.issue(ArityMismatch(annot, 1, len(call.args),
+                                                 self.ctx.file_path, get_range(call.func)))
+                    return []
+
+                arg = call.args[0]
+                match arg:
+                    case ast.Constant(str() as s):
+                        value = ast.parse(s, mode='eval').body
+                        return [Ensure(mk_eq(ast.Name('_'), value), call)]
+                    case _:
+                        self.ctx.issue(InvalidArg(annot, 'return value (a string literal)',
+                                                  self.ctx.file_path, get_range(arg)))
+                        return []
+
+            case _:
+                raise NameError(f"Unknown contract annotation '{annot}'")
 
     def _check_arg_type(self, actual: str | ast.expr, expected: Type, body: list[ast.stmt],
                         *, position: int | ast.Name | None = None, keyword: str | ast.Name | None = None,
@@ -289,11 +303,11 @@ class Checker(ast.NodeTransformer):
 
     def visit_TypeAlias(self, node: ast.TypeAlias) -> ast.TypeAlias:
         if len(node.type_params) == 0:
-            self._check_type_alias(node.name, node.value)
+            self._define_type(node.name, node.value)
 
         return node
 
-    def _check_type_alias(self, target: ast.Name, value: ast.expr) -> None:
+    def _define_type(self, target: ast.Name, value: ast.expr) -> None:
         d = TypeDef(analyze(value, self.ctx))
         match self.ctx.get(target.id):
             case None:
@@ -302,61 +316,27 @@ class Checker(ast.NodeTransformer):
                 self.ctx.issue(RedefinedName(self.ctx.file_path, get_range(target)))
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> list[ast.stmt]:
-        body: list[ast.stmt] = [node]
-        match node.target, node.annotation:
-            case ast.Name(), ast.Name('type') if node.value:  # type alias
-                self._check_type_alias(node.target, node.value)
-                return body
-            case ast.Name(x), a:  # variable declaration
-                d = VarDef(analyze(a, self.ctx))
-                if x not in self.ctx:
-                    self.ctx[x] = d
-                    if node.value:  # assignment
-                        self._check_type(x, d.typ, node.value, body)
-                else:
-                    self.ctx.issue(RedefinedName(self.ctx.file_path, get_range(node.target)))
-            case e, a:  # ignore annotation and regard it as assignment
-                # self.ctx.issue(IgnoredAnnot(self.ctx.file_path, get_range(node.annotation)))
-                if node.value:
-                    self._check_left_value(e, body)
-        return body
-
-    def _check_left_value(self, value: ast.expr, body: list[ast.stmt]) -> Type | None:
-        match value:
+        match node.target:
             case ast.Name(x):
-                match self.ctx.lookup(x):
-                    case None:
-                        self.ctx.issue(UndefinedName(self.ctx.file_path, get_range(value)))
-                        return None
-                    case VarDef(tx):
-                        self._check_type(x, tx, value, body)
-                        return tx
-                    case _:
-                        self.ctx.issue(NotAssignable(self.ctx.file_path, get_range(value)))
-                        return None
-            case ast.Attribute(e, x):
-                t = self._check_left_value(e, body)
-                if t:
-                    match t:
-                        case ClassType(_, fs) if x in fs:
-                            self._check_type(value, fs[x], value, body)
-                            return fs[x]
-                return None
-            case ast.Subscript(e, ek):
-                t = self._check_left_value(e, body)
-                if t:
-                    match t:
-                        case ListType(te):
-                            ts = t if isinstance(ek, ast.Slice) else te
-                            self._check_type(value, ts, value, body)
-                            return ts
-                        case DictType(tk, tv):
-                            self._check_type(ek, tk, value, body)
-                            self._check_type(value, tv, value, body)
-                            return tv
-                return None
+                match node.annotation:
+                    case ast.Name('type') if node.value:  # type alias
+                        self._define_type(node.target, node.value)
+                        return [node]
+                    case _:  # variable declaration
+                        d = VarDef(analyze(node.annotation, self.ctx))
+                        if x not in self.ctx:
+                            self.ctx[x] = d
+                            body: list[ast.stmt] = []
+                            if node.value:  # assignment
+                                self._check_type(x, d.typ, node.value, body)
+                            return body
+                        else:
+                            self.ctx.issue(RedefinedName(self.ctx.file_path, get_range(node.target)))
+                            return []
             case _:
-                return None
+                self.ctx.issue(InvalidTarget("illegal target for annotation assignment",
+                                             self.ctx.file_path, get_range(node.target)))
+                return []
 
     def visit_Assign(self, node: ast.Assign) -> list[ast.stmt]:
         body: list[ast.stmt] = [node]
@@ -369,10 +349,50 @@ class Checker(ast.NodeTransformer):
                         self.ctx[x] = VarDef(AnyType())
             # Check each left value
             for e in es:
-                self._check_left_value(e, body)
+                self._check_target_type(e, body)
         return body
+
+    def _check_target_type(self, target: ast.expr, body: list[ast.stmt]) -> Type | None:
+        match target:
+            case ast.Name(x):
+                match self.ctx.lookup(x):
+                    case VarDef(tx):
+                        self._check_type(x, tx, target, body)
+                        return tx
+                    case TypeDef() | TypeConstrDef() | AnnDef():
+                        self.ctx.issue(InvalidTarget("not assignable", self.ctx.file_path, get_range(target)))
+
+                return None
+
+            case ast.Attribute(e, x):
+                t = self._check_target_type(e, body)
+                if t:
+                    match t:
+                        case ClassType(_, fs) if x in fs:
+                            self._check_type(target, fs[x], target, body)
+                            return fs[x]
+
+                return None
+
+            case ast.Subscript(e, ek):
+                t = self._check_target_type(e, body)
+                if t:
+                    match t:
+                        case ListType(te):
+                            ts = t if isinstance(ek, ast.Slice) else te
+                            self._check_type(target, ts, target, body)
+                            return ts
+                        case DictType(tk, tv):
+                            self._check_type(ek, tk, target, body)
+                            self._check_type(target, tv, target, body)
+                            return tv
+
+                return None
+
+            case _:
+                return None
 
     def visit_AugAssign(self, node: ast.AugAssign) -> list[ast.stmt]:
         body: list[ast.stmt] = [node]
-        self._check_left_value(node.target, body)
+        self._check_target_type(node.target, body)
         return body

@@ -25,123 +25,123 @@ class Base(unittest.TestCase):
 
 class TestParseLiteral(Base):
     def test_ordinary(self) -> None:
-        actual = parse('a', grammar_format='regex')
+        actual = parse('a', syntax='regex')
         self.assert_equal(actual, Lit('a'))
 
     def test_escape_backslash(self) -> None:
-        actual = parse(r'\\', grammar_format='regex')
+        actual = parse(r'\\', syntax='regex')
         self.assert_equal(actual, Lit('\\'))
 
     def test_escape_tab(self) -> None:
-        actual = parse(r'\t', grammar_format='regex')
+        actual = parse(r'\t', syntax='regex')
         self.assert_equal(actual, Lit('\t'))
 
     def test_escape_special(self) -> None:
-        actual = parse(r'\*', grammar_format='regex')
+        actual = parse(r'\*', syntax='regex')
         self.assert_equal(actual, Lit('*'))
 
     def test_escape_octal(self) -> None:
-        actual = parse(r'\777', grammar_format='regex')
+        actual = parse(r'\777', syntax='regex')
         self.assert_equal(actual, Lit(chr(0o777)))
 
     def test_escape_hexadecimal_2(self) -> None:
-        actual = parse(r'\xFF', grammar_format='regex')
+        actual = parse(r'\xFF', syntax='regex')
         self.assert_equal(actual, Lit(chr(0xFF)))
 
     def test_escape_hexadecimal_4(self) -> None:
-        actual = parse(r'\uFFFF', grammar_format='regex')
+        actual = parse(r'\uFFFF', syntax='regex')
         self.assert_equal(actual, Lit(chr(0xFFFF)))
 
     def test_escape_hexadecimal_8(self) -> None:
-        actual = parse(r'\U0010FFFF', grammar_format='regex')
+        actual = parse(r'\U0010FFFF', syntax='regex')
         self.assert_equal(actual, Lit(chr(0x10FFFF)))
 
     def test_invalid_escape(self) -> None:
-        actual = parse(r'\z', grammar_format='regex')
+        actual = parse(r'\z', syntax='regex')
         self.assert_error(actual, "invalid escape sequence")
 
     def test_invalid_escape_hexadecimal_2(self) -> None:
-        actual = parse(r'\xF', grammar_format='regex')
+        actual = parse(r'\xF', syntax='regex')
         self.assert_error(actual, "expected 2 hex digits")
 
     def test_invalid_escape_hexadecimal_4(self) -> None:
-        actual = parse(r'\uFFF', grammar_format='regex')
+        actual = parse(r'\uFFF', syntax='regex')
         self.assert_error(actual, "expected 4 hex digits")
 
     def test_invalid_escape_hexadecimal_8(self) -> None:
-        actual = parse(r'\U10FFFF', grammar_format='regex')
+        actual = parse(r'\U10FFFF', syntax='regex')
         self.assert_error(actual, "expected 8 hex digits")
 
     def test_escape_line_str(self) -> None:
-        actual = parse(r'0\n\+1', grammar_format='regex')
+        actual = parse(r'0\n\+1', syntax='regex')
         self.assert_equal(actual, Concat([Lit('0'), Lit('\n'), Lit('+'), Lit('1')]))
 
     def test_escape_octal_str(self) -> None:
-        actual = parse(r'\7777', grammar_format='regex')
+        actual = parse(r'\7777', syntax='regex')
         self.assert_equal(actual, Concat([Lit(chr(0o777)), Lit('7')]))
 
     def test_escape_hexadecimal_str(self) -> None:
-        actual = parse(r'\xFFFF', grammar_format='regex')
+        actual = parse(r'\xFFFF', syntax='regex')
         self.assert_equal(actual, Concat([Lit(chr(0xFF)), Lit('F'), Lit('F')]))
 
 
 class TestParseRegex(Base):
     def test_union(self) -> None:
-        actual = parse('a|b|c', grammar_format='regex')
+        actual = parse('a|b|c', syntax='regex')
         self.assert_equal(actual, Union([Lit('a'), Lit('b'), Lit('c')]))
 
     def test_concat(self) -> None:
-        actual = parse('abc', grammar_format='regex')
+        actual = parse('abc', syntax='regex')
         self.assert_equal(actual, Concat([Lit('a'), Lit('b'), Lit('c')]))
 
     def test_star(self) -> None:
-        actual = parse('a*', grammar_format='regex')
+        actual = parse('a*', syntax='regex')
         self.assert_equal(actual, Star(Lit('a')))
 
     def test_plus(self) -> None:
-        actual = parse('a+', grammar_format='regex')
+        actual = parse('a+', syntax='regex')
         self.assert_equal(actual, Plus(Lit('a')))
 
     def test_optional(self) -> None:
-        actual = parse('a?', grammar_format='regex')
+        actual = parse('a?', syntax='regex')
         self.assert_equal(actual, Optional(Lit('a')))
 
     def test_power(self) -> None:
-        actual = parse('a{3}', grammar_format='regex')
+        actual = parse('a{3}', syntax='regex')
         self.assert_equal(actual, Power(Lit('a'), 3))
 
     def test_loop(self) -> None:
-        actual = parse('a{2,5}', grammar_format='regex')
+        actual = parse('a{2,5}', syntax='regex')
         self.assert_equal(actual, Loop(Lit('a'), NatRange(2, 5)))
 
     def test_loop_unbounded(self) -> None:
-        actual = parse('a{,}', grammar_format='regex')
+        actual = parse('a{,}', syntax='regex')
         self.assert_equal(actual, Loop(Lit('a'), NatRange(0, None)))
 
     def test_char_class_inclusive(self) -> None:
-        actual = parse('[a-cx-z]', grammar_format='regex')
+        actual = parse('[a-cx-z]', syntax='regex')
         self.assert_equal(actual, CharClass('inclusive', [CharRange('a', 'c'), CharRange('x', 'z')]))
 
     def test_char_class_exclusive(self) -> None:
-        actual = parse(r'[^.+\-|]', grammar_format='regex')
+        actual = parse(r'[^.+\-|]', syntax='regex')
         self.assert_equal(actual, CharClass('exclusive', ['.', '+', '-', '|']))
 
     def test_char_class_escape(self) -> None:
-        actual = parse(r'[\'\x41-\x5A\[\-\]]', grammar_format='regex')
+        actual = parse(r'[\'\x41-\x5A\[\-\]]', syntax='regex')
         self.assert_equal(actual, CharClass('inclusive', ["'", CharRange('A', 'Z'), '[', '-', ']']))
 
     def test_invalid_char_class(self) -> None:
-        actual = parse('[ab-]', grammar_format='regex')
+        actual = parse('[ab-]', syntax='regex')
         self.assertIsInstance(actual, InvalidSyntax)
 
     def test_nested_expr(self) -> None:
-        actual = parse('(ab?|c(d|e)[^f])*', grammar_format='regex')
+        actual = parse('(ab?|c(d|e)[^f])*', syntax='regex')
         self.assert_equal(actual, Star(Union([Concat([Lit('a'), Optional(Lit('b'))]),
                                               Concat([Lit('c'), Union([Lit('d'), Lit('e')]),
                                                       CharClass('exclusive', ['f'])])])))
 
     def test_invalid_multiple_stars(self) -> None:
-        actual = parse('a**', grammar_format='regex')
+        actual = parse('a**', syntax='regex')
         self.assert_error(actual, 'EOF')
 
 

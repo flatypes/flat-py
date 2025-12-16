@@ -1,29 +1,24 @@
 import ast
+import os.path
 from typing import FrozenSet, Sequence
 
 from flat.backend.lang import NT, project
 from flat.py.ast_helpers import *
 from flat.py.compile_time import *
 from flat.py.grammar import *
-from flat.py.parser import grammar_formats, parse
-from flat.py.shared import Range, get_range
+from flat.py.parser import parse, LANG_SYNTAX
+from flat.py.shared import Range, get_range, get_code
 
 __all__ = ['analyze_lang', 'analyze']
 
 
-def analyze_lang(grammar_source: str,
-                 ctx: Context,
-                 *,
-                 grammar_format: str = 'ebnf',
-                 start_row: int = 0,
-                 start_col_offset: int = 0) -> LangType | AnyType:
+def analyze_lang(grammar: str, ctx: Context,
+                 *, syntax: str = 'ebnf', name: ast.expr | None = None,
+                 start: tuple[int, int] = (0, 0)) -> LangType | AnyType:
     """Analyze a grammar definition. Return a language type if parsing succeed; otherwise, return Any type."""
-    if grammar_format not in grammar_formats:
-        ctx.issue(InvalidFormat(ctx.file_path, Range.at(start_row, start_col_offset)))
-        return AnyType()
+    assert syntax in LANG_SYNTAX, f"unknown language syntax: {syntax!r}"
 
-    result = parse(grammar_source, grammar_format=grammar_format,
-                   file_path=ctx.file_path, start_row=start_row, start_col_offset=start_col_offset)
+    result = parse(grammar, syntax=syntax, file_path=ctx.file_path, start=start)
     if isinstance(result, InvalidSyntax):
         ctx.issue(result)
         return AnyType()
@@ -40,7 +35,7 @@ def analyze_lang(grammar_source: str,
     for rule in rules:
         desugar.visit_rule(rule.name.name, rule.body)
 
-    return LangType(desugar.rules)
+    return LangType(desugar.rules, name)
 
 
 class Desugar(ExprVisitor):
@@ -94,8 +89,8 @@ class Desugar(ExprVisitor):
             case TypeDef(LangType(lang)):
                 if 'start' in lang:
                     lang = project(lang, 'start')
-                    for id in lang:
-                        self.rules[f'{node.name}.{id}'] = lang[id]
+                    for name in lang:
+                        self.rules[f'{node.name}.{name}'] = lang[name]
                 else:
                     self.ctx.issue(NoStartRule(self.ctx.file_path, node.pos))
                 return [NT(f'{node.name}.start')]
@@ -169,181 +164,213 @@ class Analyzer(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> Type:
         if node.value is None:
             return none_type
-        else:
-            self.ctx.issue(InvalidType(self.ctx.file_path, get_range(node)))
-            return AnyType()
+
+        return AnyType()
 
     def visit_Name(self, node: ast.Name) -> Type:
         match self.ctx.lookup(node.id):
-            case None:
-                if node.id in b_type_items:
-                    return TypeName(node.id)
-                elif node.id in b_constr_items:
-                    return self._check_type_call_nil(node.id, node)
-                else:
-                    self.ctx.issue(UndefinedName(self.ctx.file_path, get_range(node)))
-                    return AnyType()
-            case VarDef() | FunDef():
-                self.ctx.issue(InvalidType(self.ctx.file_path, get_range(node)))
-                return AnyType()
             case TypeDef(t):
                 return t
-            case TypeConstrDef(f):
-                return self._check_type_call_nil(f, node)
-            case _:
-                return AnyType()
+            case TypeConstrDef(tc):
+                return self._check_nil_constr(tc, node)
+            case None if node.id in b_type_items:
+                return BuiltinType(node.id)
 
-    def _check_type_call_nil(self, fun_id: str, fun_node: ast.expr) -> Type:
-        match fun_id:
-            case 'tuple':
-                return TupleType([AnyType()], variant=True)
-            case 'list':
-                return ListType(AnyType())
-            case 'set':
-                return SetType(AnyType())
-            case 'dict':
-                return DictType(AnyType(), AnyType())
+        return AnyType()
+
+    def _check_nil_constr(self, constr: str, name_tree: ast.expr) -> Type:
+        match constr:
+            case 'flat.py.lang':
+                self.ctx.issue(ArityMismatch(constr, 1, 0,
+                                             self.ctx.file_path, get_range(name_tree)))
+            case 'flat.py.refine':
+                self.ctx.issue(ArityMismatch(constr, (2,), 0,
+                                             self.ctx.file_path, get_range(name_tree)))
             case 'typing.Literal':
-                self.ctx.issue(ArityMismatch('at least 1', 0, self.ctx.file_path, get_range(fun_node)))
-                return AnyType()
+                self.ctx.issue(ArityMismatch(constr, (1,), 0,
+                                             self.ctx.file_path, get_range(name_tree)))
             case 'typing.Union':
                 # NOTE: mypy interprets this as a bottom type
-                self.ctx.issue(ArityMismatch('at least 2', 0, self.ctx.file_path, get_range(fun_node)))
-                return AnyType()
+                self.ctx.issue(ArityMismatch(constr, (2,), 0,
+                                             self.ctx.file_path, get_range(name_tree)))
             case 'typing.Optional':
-                self.ctx.issue(ArityMismatch('1', 0, self.ctx.file_path, get_range(fun_node)))
-                return AnyType()
-            case _:
-                raise NameError(f"Unknown type constructor '{fun_id}'.")
+                self.ctx.issue(ArityMismatch(constr, 1, 0,
+                                             self.ctx.file_path, get_range(name_tree)))
+
+        return AnyType()
 
     def visit_Call(self, node: ast.Call) -> Type:
         match node.func:
-            case ast.Name(f):
-                match self.ctx.lookup(f):
-                    case None:
-                        self.ctx.issue(UndefinedName(self.ctx.file_path, get_range(node.func)))
-                        return AnyType()
-                    case TypeConstrDef(id):
-                        return self._check_type_call_paren(id, node.args, node.keywords, get_range(node))
+            case ast.Name(name):
+                match self.ctx.lookup(name):
+                    case TypeConstrDef('flat.py.lang'):
+                        return self._check_lang(node)
+                    case TypeConstrDef('flat.py.refine'):
+                        return self._check_refine(node)
 
-        self.ctx.issue(InvalidType(self.ctx.file_path, get_range(node)))
         return AnyType()
 
-    def _check_type_call_paren(self, fun_id: str, args: list[ast.expr], keywords: list[ast.keyword],
-                               pos: Range) -> Type:
-        match fun_id, args:
-            case 'flat.py.lang', [arg]:
-                match arg:
-                    case ast.Constant(str() as s):
-                        # NOTE: start position should be after the opening quote
-                        fmt = self._get_format(keywords)
-                        return analyze_lang(s, self.ctx, grammar_format=fmt,
-                                            start_row=arg.lineno - 1, start_col_offset=arg.col_offset)
-                    case _:
-                        self.ctx.issue(InvalidType(self.ctx.file_path, get_range(arg)))
-                        return AnyType()
-            case 'flat.py.lang', _:
-                self.ctx.issue(ArityMismatch('1', len(args), self.ctx.file_path, pos))
-                return AnyType()
-            case 'flat.py.refine', [arg_t, arg_p]:
-                t = self.visit(arg_t)
-                match arg_p:
-                    case ast.Constant(str() as code):
-                        p = mk_lambda(['_'], ast.parse(code, mode='eval').body)
-                    case p:
-                        pass
-                return RefinedType(t, p)
-            case 'flat.py.refine', _:
-                self.ctx.issue(ArityMismatch('2', len(args), self.ctx.file_path, pos))
-                return AnyType()
-            case _:
-                raise NameError(f"Unknown type constructor '{fun_id}'.")
+    def _check_lang(self, call: ast.Call) -> Type:
+        if len(call.args) != 1:
+            self.ctx.issue(ArityMismatch('flat.py.lang', 1, len(call.args),
+                                         self.ctx.file_path, get_range(call.func)))
+            return AnyType()
 
-    def _get_format(self, keywords: list[ast.keyword]) -> str:
-        for kw in keywords:
-            if kw.arg == 'format':
+        syntax = 'ebnf'
+        name: ast.expr | None = None
+        for kw in call.keywords:
+            if kw.arg == 'syntax':
                 match kw.value:
-                    case ast.Constant(str() as s) if s in grammar_formats:
-                        return s  # type: ignore
+                    case ast.Constant(str() as s) if s in LANG_SYNTAX:
+                        syntax = s
                     case _:
-                        self.ctx.issue(InvalidFormat(self.ctx.file_path, get_range(kw.value)))
+                        self.ctx.issue(InvalidValue('syntax', ', '.join(LANG_SYNTAX),
+                                                    self.ctx.file_path, get_range(kw.value)))
+            elif kw.arg == 'name':
+                name = kw.value
 
-        return 'ebnf'
+        arg = call.args[0]
+        match arg:
+            case ast.Constant(str() as s):
+                if os.path.exists(self.ctx.file_path):
+                    arg_code = get_code(self.ctx.file_path, get_range(arg))
+                    if arg_code.startswith('"""'):
+                        assert arg_code.endswith('"""')
+                        quote_len = 3
+                    else:
+                        assert arg_code.startswith('"') or arg_code.startswith("'")
+                        quote_len = 1
+                    grammar_source = arg_code[quote_len:-quote_len]
+                else:
+                    quote_len = 0
+                    grammar_source = s
+                return analyze_lang(grammar_source, self.ctx, syntax=syntax, name=name,
+                                    start=(arg.lineno - 1, arg.col_offset + quote_len))
+
+        self.ctx.issue(InvalidArg('flat.py.lang', 'grammar (a string literal)',
+                                  self.ctx.file_path, get_range(arg)))
+        return AnyType()
+
+    def _check_refine(self, call: ast.Call) -> Type:
+        if len(call.args) < 2:
+            self.ctx.issue(ArityMismatch('flat.py.refine', (2,), len(call.args),
+                                         self.ctx.file_path, get_range(call.func)))
+            return AnyType()
+
+        t = self.visit(call.args[0])
+        conds: list[ast.expr] = []
+        for arg in call.args[1:]:
+            match arg:
+                case ast.Constant(str() as s):
+                    conds.append(ast.parse(s, mode='eval').body)
+                case _:
+                    self.ctx.issue(InvalidArg('flat.py.refine', 'condition (a string literal)',
+                                              self.ctx.file_path, get_range(arg)))
+
+        return RefinedType(t, conds)
 
     def visit_Subscript(self, node: ast.Subscript) -> Type:
         match node.value:
-            case ast.Name(f):
-                match self.ctx.lookup(f):
-                    case None:
-                        if f in b_constr_items:
-                            return self._check_type_call_bracket(f, get_type_args(node), get_range(node))
-                        else:
-                            self.ctx.issue(UndefinedName(self.ctx.file_path, get_range(node.value)))
-                            return AnyType()
-                    case TypeConstrDef(f):
-                        return self._check_type_call_bracket(f, get_type_args(node), get_range(node))
+            case ast.Name(name):
+                match self.ctx.lookup(name):
+                    case TypeConstrDef(tc):
+                        return self._check_constr(tc, get_type_args(node), get_range(node))
+                    case None if name in b_constr_items:
+                        return self._check_constr(name, get_type_args(node), get_range(node))
+                    case Type() as t:
+                        self.ctx.issue(InvalidType(f"type '{t}' does not take arguments",
+                                                   self.ctx.file_path, get_range(node)))
+                        return AnyType()
 
-        self.ctx.issue(InvalidType(self.ctx.file_path, get_range(node)))
         return AnyType()
 
-    def _check_type_call_bracket(self, fun_id: str, args: list[ast.expr], pos: Range) -> Type:
-        match fun_id, args:
-            case 'tuple', [*args, ast.Constant(v)] if v is ...:
-                return TupleType([self.visit(arg) for arg in args], variant=True)
-            case 'tuple', _:
-                return TupleType([self.visit(arg) for arg in args])
-            case 'list', [arg]:
-                return ListType(self.visit(arg))
-            case 'list', _:
-                self.ctx.issue(ArityMismatch('1', len(args), self.ctx.file_path, pos))
+    def _check_constr(self, constr: str, args: Sequence[ast.expr], type_pos: Range) -> Type:
+        match constr:
+            case 'flat.py.lang':
+                self.ctx.issue(InvalidType(f"expected lang(...)", self.ctx.file_path, type_pos))
                 return AnyType()
-            case 'set', [arg]:
-                return SetType(self.visit(arg))
-            case 'set', _:
-                self.ctx.issue(ArityMismatch('1', len(args), self.ctx.file_path, pos))
+
+            case 'flat.py.refine':
+                self.ctx.issue(InvalidType(f"expected refine(..., ...)", self.ctx.file_path, type_pos))
                 return AnyType()
-            case 'dict', [key_arg, value_arg]:
-                return DictType(self.visit(key_arg), self.visit(value_arg))
-            case 'dict', _:
-                self.ctx.issue(ArityMismatch('2', len(args), self.ctx.file_path, pos))
-                return AnyType()
-            case 'typing.Literal', _:
-                return self._check_literal_type(args)
-            case 'typing.Union', _:
-                return UnionType([self.visit(e) for e in args])
-            case 'typing.Optional', [arg]:
-                return UnionType([self.visit(arg), none_type])
-            case 'typing.Optional', _:
-                self.ctx.issue(ArityMismatch('1', len(args), self.ctx.file_path, pos))
-                return AnyType()
+
+            case 'tuple':
+                variant = False
+                fixed_args = args
+                if is_ellipsis(args[-1]):
+                    variant = True
+                    fixed_args = args[:-1]
+
+                elem_types: list[Type] = []
+                for arg in fixed_args:
+                    if is_ellipsis(arg):
+                        self.ctx.issue(InvalidArg(constr, 'type', self.ctx.file_path, get_range(arg)))
+                    else:
+                        elem_types.append(self.visit(arg))
+                return TupleType(elem_types, variant=variant)
+
+            case 'list' | 'set':
+                if len(args) != 1:
+                    self.ctx.issue(ArityMismatch(constr, 1, len(args), self.ctx.file_path, type_pos))
+                    return AnyType()
+
+                elem_type = self.visit(args[0])
+                if constr == 'list':
+                    return ListType(elem_type)
+                else:
+                    return SetType(elem_type)
+
+            case 'dict':
+                if len(args) != 2:
+                    self.ctx.issue(ArityMismatch(constr, 2, len(args), self.ctx.file_path, type_pos))
+                    return AnyType()
+
+                key_type = self.visit(args[0])
+                value_type = self.visit(args[1])
+                return DictType(key_type, value_type)
+
+            case 'typing.Literal':
+                values: list[LitValue] = []
+                for arg in args:
+                    values += self._check_lit_value(arg)
+                return LitType(values)
+
+            case 'typing.Union':
+                types = [self.visit(e) for e in args]
+                return UnionType(types)
+
+            case 'typing.Optional':
+                if len(args) != 1:
+                    self.ctx.issue(ArityMismatch(constr, 1, len(args), self.ctx.file_path, type_pos))
+                    return AnyType()
+
+                typ = self.visit(args[0])
+                return UnionType([typ, none_type])
+
             case _:
-                raise NameError(f"Unknown type constructor '{fun_id}'.")
+                raise NameError(f"Unknown type constructor '{constr}'.")
 
-    def _check_literal_type(self, args: list[ast.expr]) -> Type:
-        values: list[LitValue] = []
-        for arg in args:
-            match arg:
-                case ast.Constant(v):
-                    values.append(v)
-                case ast.UnaryOp(ast.USub(), ast.Constant(v)) if isinstance(v, (int, float, complex)):
-                    values.append(-v)
-                case _:
-                    match self.visit(arg):
-                        case LitType(vs):
-                            values += vs
-                        case _:
-                            self.ctx.issue(InvalidLitValue(self.ctx.file_path, get_range(arg)))
+    def _check_lit_value(self, arg: ast.expr) -> Sequence[LitValue]:
+        match arg:
+            case ast.Constant(v):
+                return [v]
+            case ast.UnaryOp(ast.USub(), ast.Constant(v)) if isinstance(v, (int, float, complex)):
+                return [-v]
 
-        return LitType(values)
+        match self.visit(arg):
+            case LitType(vs):
+                return vs
+            case _:
+                self.ctx.issue(InvalidArg('typing.Literal', 'literal value',
+                                          self.ctx.file_path, get_range(arg)))
+                return []
 
     def visit_BinOp(self, node: ast.BinOp) -> Type:
         if isinstance(node.op, ast.BitOr):
             args = get_operands(node, ast.BitOr)
-            return self._check_type_call_bracket('typing.Union', args, get_range(node))
-        else:
-            self.ctx.issue(InvalidType(self.ctx.file_path, get_range(node)))
-            return AnyType()
+            return self._check_constr('typing.Union', args, get_range(node))
+
+        return AnyType()
 
     def generic_visit(self, node: ast.AST) -> Type:
-        self.ctx.issue(InvalidType(self.ctx.file_path, get_range(node)))
         return AnyType()

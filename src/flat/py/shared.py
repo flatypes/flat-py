@@ -4,7 +4,7 @@ import sys
 from dataclasses import dataclass
 from typing import Sequence
 
-__all__ = ['Range', 'get_range', 'print_details']
+__all__ = ['Range', 'get_range', 'get_code', 'print_details']
 
 
 @dataclass(frozen=True)
@@ -14,6 +14,13 @@ class Range:
     end_lineno: int  # inclusive, one-based
     col_offset: int  # inclusive, zero-based
     end_col_offset: int  # exclusive, zero-based
+
+    def __rshift__(self, delta: tuple[int, int]) -> 'Range':
+        delta_row, delta_col = delta
+        return Range(self.lineno + delta_row,
+                     self.end_lineno + delta_row,
+                     self.col_offset + delta_col if self.lineno == 1 else self.col_offset,
+                     self.end_col_offset + delta_col if self.lineno == 1 else self.end_col_offset)
 
     @staticmethod
     def at(row: int, col_offset: int) -> 'Range':
@@ -32,6 +39,17 @@ def get_range(node: ast.AST) -> Range:
     assert col_offset is not None
     assert end_col_offset is not None
     return Range(lineno, end_lineno, col_offset, end_col_offset)
+
+
+def get_code(file_path: str, pos: Range) -> str:
+    """Get the source code at the given position range."""
+    lines = []
+    for lineno in range(pos.lineno, pos.end_lineno + 1):
+        line = linecache.getline(file_path, lineno)
+        start = pos.col_offset if lineno == pos.lineno else 0
+        end = pos.end_col_offset if lineno == pos.end_lineno else len(line)
+        lines.append(line[start:end])
+    return ''.join(lines)
 
 
 def print_details(file_path: str, caret_range: Range, details: Sequence[str],

@@ -28,3 +28,9 @@ dev = [
 test = [
     "pytest>=9.0.0",
 ]
+
+[tool.mypy]
+python_version = 3.12
+exclude = [
+    'test-examples'
+]

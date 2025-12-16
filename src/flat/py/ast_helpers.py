@@ -2,7 +2,7 @@ import ast
 from typing import Sequence
 
 __all__ = ['mk_eq', 'mk_attr', 'mk_call', 'mk_lambda', 'mk_assign', 'mk_foreach', 'mk_import_from',
-           'erase_ann', 'get_type_args', 'get_left_values', 'get_operands', 'is_pure']
+           'erase_ann', 'get_type_args', 'get_left_values', 'get_operands', 'is_ellipsis', 'is_pure']
 
 
 def mk_eq(left: ast.expr, right: ast.expr) -> ast.expr:
@@ -92,6 +92,11 @@ def get_operands(expr: ast.expr, op: type[ast.operator]) -> list[ast.expr]:
             return get_operands(left, op) + get_operands(right, op)
         case _:
             return [expr]
+
+
+def is_ellipsis(expr: ast.expr) -> bool:
+    """Tests whether an expression is an ellipsis."""
+    return isinstance(expr, ast.Constant) and expr.value is Ellipsis
 
 
 def is_pure(expr: ast.expr) -> bool:

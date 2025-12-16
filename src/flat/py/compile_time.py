@@ -10,16 +10,16 @@ from flat.backend.lang import Lang
 from flat.py.ast_helpers import mk_call
 from flat.py.shared import Range, print_details
 
-__all__ = ['Type', 'AnyType', 'TypeName', 'LangType', 'RefinedType',
+__all__ = ['Type', 'AnyType', 'BuiltinType', 'LangType', 'RefinedType',
            'LitValue', 'LitType', 'none_type', 'UnionType', 'TupleType', 'ListType',
            'SetType', 'DictType', 'ClassType', 'Contract', 'Require', 'Ensure',
            'Def', 'AnnDef', 'TypeDef', 'TypeConstrDef', 'VarDef', 'ArgDef',
            'FunDef', 'UnknownDef', 'Scope', 'Context',
            'Diagnostic', 'Level', 'Issuer',
-           'InvalidSyntax', 'UndefinedRule', 'RedefinedRule', 'NoStartRule',
+           'InvalidSyntax', 'InvalidArg', 'InvalidValue',
+           'UndefinedRule', 'RedefinedRule', 'NoStartRule',
            'EmptyRange', 'ArityMismatch', 'UndefinedName', 'RedefinedName',
-           'InvalidType', 'InvalidLitValue', 'InvalidFormat', 'UndefinedNonlocal',
-           'NotAssignable', 'UnsupportedFeature']
+           'InvalidType', 'UndefinedNonlocal']
 
 
 class Type(ABC):
@@ -40,8 +40,8 @@ class AnyType(Type):
 
 
 @dataclass(frozen=True)
-class TypeName(Type):
-    """Builtin-type, or type alias reference."""
+class BuiltinType(Type):
+    """Built-in type."""
     name: str
 
     def to_runtime(self, rt: str) -> ast.expr:
@@ -51,6 +51,7 @@ class TypeName(Type):
 @dataclass(frozen=True)
 class LangType(Type):
     lang: Lang
+    name: ast.expr | None = None
 
     def to_runtime(self, rt: str) -> ast.expr:
         return mk_call(f'{rt}.LangType')
@@ -59,10 +60,11 @@ class LangType(Type):
 @dataclass(frozen=True)
 class RefinedType(Type):
     base: Type
-    predicate: ast.expr
+    conds: Sequence[ast.expr]
 
     def to_runtime(self, rt: str) -> ast.expr:
-        return mk_call(f'{rt}.RefinedType', self.base.to_runtime(rt), self.predicate)
+        return mk_call(f'{rt}.RefinedType', self.base.to_runtime(rt),
+                       ast.BoolOp(ast.And(), list(self.conds)))
 
 
 type LitValue = str | bytes | bool | int | float | complex | None | EllipsisType
@@ -234,13 +236,21 @@ class Level(Enum):
         return self.name
 
 
-@dataclass(frozen=True)
-class Diagnostic:
+class Diagnostic(ABC):
     file_path: str
     pos: Range
     summary: str
-    detail: str = ''
-    level: Level = Level.ERROR
+    level: Level
+
+    def __init__(self, file_path: str, pos: Range, summary: str, *, level: Level = Level.ERROR) -> None:
+        self.file_path = file_path
+        self.pos = pos
+        self.summary = summary
+        self.level = level
+
+    @property
+    def details(self) -> Sequence[str]:
+        return []
 
 
 class Issuer:
@@ -280,7 +290,7 @@ class Issuer:
         """Pretty-print all diagnostics."""
         for diagnostic in self._diagnostics:
             print(f"-- {diagnostic.level}: {diagnostic.summary}", file=sys.stderr)
-            print_details(diagnostic.file_path, diagnostic.pos, [])
+            print_details(diagnostic.file_path, diagnostic.pos, diagnostic.details)
 
 
 class Context:
@@ -356,18 +366,24 @@ class Context:
         raise NotImplementedError
 
 
-# Instances of specific diagnostics:
+# Instances of specific diagnostics
+
 class InvalidSyntax(Diagnostic):
     def __init__(self, detail: str, file_path: str, pos: Range) -> None:
-        super().__init__(file_path, pos, "invalid syntax", detail)
+        super().__init__(file_path, pos, "invalid syntax")
+        self.detail = detail
 
-
-class UndefinedRule(Diagnostic):
-    def __init__(self, file_path: str, rule_pos: Range) -> None:
-        super().__init__(file_path, rule_pos, "undefined rule")
+    @property
+    def details(self) -> Sequence[str]:
+        return [self.detail]
 
 
 class RedefinedRule(Diagnostic):
+    def __init__(self, file_path: str, rule_pos: Range) -> None:
+        super().__init__(file_path, rule_pos, "redefined rule")
+
+
+class UndefinedRule(Diagnostic):
     def __init__(self, file_path: str, rule_pos: Range) -> None:
         super().__init__(file_path, rule_pos, "undefined rule")
 
@@ -383,13 +399,55 @@ class EmptyRange(Diagnostic):
 
 
 class ArityMismatch(Diagnostic):
-    def __init__(self, expected: int | str, actual: int, file_path: str, fun_pos: Range) -> None:
-        super().__init__(file_path, fun_pos, "arity mismatch", f"expected {expected} argument(s), but got {actual}")
+    def __init__(self, constr: str, expected: int | tuple[int], actual: int, file_path: str, type_pos: Range) -> None:
+        super().__init__(file_path, type_pos, "arity mismatch")
+        self.constr = constr
+        self.expected = expected
+        self.actual = actual
+
+    @property
+    def details(self) -> Sequence[str]:
+        if isinstance(self.expected, int):
+            reason = 'too many' if self.actual > self.expected else 'not enough'
+            expected_str = str(self.expected)
+        else:
+            assert self.actual < self.expected[0]
+            reason = 'not enough'
+            expected_str = f'>= {self.expected[0]}'
+
+        return [f"{reason} arguments for '{self.constr}'",
+                f"expected: {expected_str}",
+                f"actual:   {self.actual}"]
 
 
-class UndefinedName(Diagnostic):
-    def __init__(self, file_path: str, name_pos: Range) -> None:
-        super().__init__(file_path, name_pos, "undefined name")
+class InvalidArg(Diagnostic):
+    def __init__(self, constr: str, expected: str, file_path: str, arg_pos: Range) -> None:
+        super().__init__(file_path, arg_pos, f"invalid argument for '{constr}'")
+        self.expected = expected
+
+    @property
+    def details(self) -> Sequence[str]:
+        return [f"expected: {self.expected}"]
+
+
+class InvalidValue(Diagnostic):
+    def __init__(self, key: str, expected: str, file_path: str, value_pos: Range) -> None:
+        super().__init__(file_path, value_pos, f"invalid value for '{key}'")
+        self.expected = expected
+
+    @property
+    def details(self) -> Sequence[str]:
+        return [f"expected: {self.expected}"]
+
+
+class InvalidType(Diagnostic):
+    def __init__(self, reason: str, file_path: str, type_pos: Range) -> None:
+        super().__init__(file_path, type_pos, "invalid type")
+        self.reason = reason
+
+    @property
+    def details(self) -> Sequence[str]:
+        return [self.reason]
 
 
 class RedefinedName(Diagnostic):
@@ -397,31 +455,25 @@ class RedefinedName(Diagnostic):
         super().__init__(file_path, name_pos, "redefined name")
 
 
-class InvalidType(Diagnostic):
-    def __init__(self, file_path: str, type_pos: Range) -> None:
-        super().__init__(file_path, type_pos, "invalid type")
-
-
-class InvalidLitValue(Diagnostic):
-    def __init__(self, file_path: str, value_pos: Range) -> None:
-        super().__init__(file_path, value_pos, "invalid literal value for 'typing.Literal'")
-
-
-class InvalidFormat(Diagnostic):
-    def __init__(self, file_path: str, format_pos: Range) -> None:
-        super().__init__(file_path, format_pos, "invalid grammar format")
-
-
 class UndefinedNonlocal(Diagnostic):
     def __init__(self, file_path: str, name_pos: Range) -> None:
-        super().__init__(file_path, name_pos, "undefined nonlocal", "this is not defined in any enclosing scope")
+        super().__init__(file_path, name_pos, "undefined nonlocal")
+
+    @property
+    def details(self) -> Sequence[str]:
+        return ["not found in any enclosing scope"]
 
 
-class NotAssignable(Diagnostic):
-    def __init__(self, file_path: str, target_pos: Range) -> None:
-        super().__init__(file_path, target_pos, "not assignable", "cannot assign to this target")
+class InvalidTarget(Diagnostic):
+    def __init__(self, reason: str, file_path: str, target_pos: Range) -> None:
+        super().__init__(file_path, target_pos, "invalid target")
+        self.reason = reason
+
+    @property
+    def details(self) -> Sequence[str]:
+        return [self.reason]
 
 
-class UnsupportedFeature(Diagnostic):
-    def __init__(self, file_path: str, pos: Range) -> None:
-        super().__init__(file_path, pos, "unsupported feature")
+class UndefinedName(Diagnostic):
+    def __init__(self, file_path: str, name_pos: Range) -> None:
+        super().__init__(file_path, name_pos, "undefined name")
