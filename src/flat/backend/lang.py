@@ -1,16 +1,8 @@
-from dataclasses import dataclass
-from typing import FrozenSet, Mapping, Sequence
+from typing import FrozenSet, Sequence
 
-__all__ = ['NT', 'Lang', 'project']
+from flat.py.shared import Lang, NT
 
-
-@dataclass
-class NT:
-    """NonTerminal symbol."""
-    name: str
-
-
-type Lang = Mapping[str, Sequence[Sequence[str | NT]]]
+__all__ = ['project']
 
 
 def project(lang: Lang, start: str) -> Lang:

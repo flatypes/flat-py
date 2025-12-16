@@ -6,9 +6,8 @@ from enum import Enum
 from types import EllipsisType
 from typing import Literal, Mapping, Sequence, Any
 
-from flat.backend.lang import Lang
-from flat.py.ast_helpers import mk_call
-from flat.py.shared import Range, print_details
+from flat.py.ast_helpers import mk_call, mk_lambda, ExprSerializer
+from flat.py.shared import Range, print_details, Lang
 
 __all__ = ['Type', 'AnyType', 'BuiltinType', 'LangType', 'RefinedType',
            'LitValue', 'LitType', 'none_type', 'UnionType', 'TupleType', 'ListType',
@@ -19,7 +18,7 @@ __all__ = ['Type', 'AnyType', 'BuiltinType', 'LangType', 'RefinedType',
            'InvalidSyntax', 'InvalidArg', 'InvalidValue',
            'UndefinedRule', 'RedefinedRule', 'NoStartRule',
            'EmptyRange', 'ArityMismatch', 'UndefinedName', 'RedefinedName',
-           'InvalidType', 'UndefinedNonlocal']
+           'InvalidType', 'UndefinedNonlocal', 'InvalidTarget']
 
 
 class Type(ABC):
@@ -36,7 +35,7 @@ class AnyType(Type):
     """Do-not-care type."""
 
     def to_runtime(self, rt: str) -> ast.expr:
-        return mk_call(f'{rt}.AnyType')
+        raise ValueError("AnyType cannot be converted to runtime type")
 
 
 @dataclass(frozen=True)
@@ -54,7 +53,8 @@ class LangType(Type):
     name: ast.expr | None = None
 
     def to_runtime(self, rt: str) -> ast.expr:
-        return mk_call(f'{rt}.LangType')
+        serializer = ExprSerializer({'flat.py.shared': rt})
+        return mk_call(f'{rt}.LangType', serializer.serialize(self.lang))
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,7 @@ class RefinedType(Type):
 
     def to_runtime(self, rt: str) -> ast.expr:
         return mk_call(f'{rt}.RefinedType', self.base.to_runtime(rt),
-                       ast.BoolOp(ast.And(), list(self.conds)))
+                       mk_lambda(['_'], ast.BoolOp(ast.And(), list(self.conds))))
 
 
 type LitValue = str | bytes | bool | int | float | complex | None | EllipsisType
@@ -95,7 +95,8 @@ class TupleType(Type):
     variant: bool = False
 
     def to_runtime(self, rt: str) -> ast.expr:
-        return mk_call(f'{rt}.TupleType', ast.List([t.to_runtime(rt) for t in self.elements]))
+        return mk_call(f'{rt}.TupleType', ast.List([t.to_runtime(rt) for t in self.elements]),
+                       ast.Constant(self.variant))
 
 
 @dataclass(frozen=True)
@@ -129,9 +130,7 @@ class ClassType(Type):
     fields: dict[str, Type]
 
     def to_runtime(self, rt: str) -> ast.expr:
-        return mk_call(f'{rt}.ClassType', ast.Constant(self.id),
-                       ast.Dict([ast.Constant(k) for k in self.fields.keys()],
-                                [v.to_runtime(rt) for v in self.fields.values()]))
+        raise NotImplementedError
 
 
 class Contract(ABC):

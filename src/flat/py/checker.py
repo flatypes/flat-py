@@ -4,7 +4,6 @@ from typing import Sequence
 from flat.py.analyzer import analyze
 from flat.py.ast_helpers import *
 from flat.py.compile_time import *
-from flat.py.compile_time import InvalidTarget
 from flat.py.runtime import SOURCE, LINENO
 from flat.py.shared import get_range
 
@@ -38,6 +37,7 @@ class Checker(ast.NodeTransformer):
         self.ctx = ctx
         self.rt = rt
         self.with_lineno = with_lineno
+        self._serializer = ExprSerializer({'flat.py.shared': rt})
 
     def visit_Module(self, node: ast.Module) -> ast.Module:
         body: list[ast.stmt] = [mk_import_from('flat.py', 'runtime', as_name=self.rt)]
@@ -223,9 +223,7 @@ class Checker(ast.NodeTransformer):
                                      position, keyword, default)))
 
     def _mk_range(self, node: ast.AST) -> ast.expr:
-        node_range = get_range(node)
-        return mk_call(f'{self.rt}.Range', node_range.lineno, node_range.end_lineno,
-                       node_range.col_offset, node_range.end_col_offset)
+        return self._serializer.serialize(get_range(node))
 
     def _check_pre(self, cond: ast.expr, cond_tree: ast.expr, body: list[ast.stmt]) -> None:
         body.append(ast.Expr(mk_call(f'{self.rt}.check_pre', cond, self._mk_range(cond_tree))))
@@ -328,6 +326,7 @@ class Checker(ast.NodeTransformer):
                             self.ctx[x] = d
                             body: list[ast.stmt] = []
                             if node.value:  # assignment
+                                body.append(mk_assign(x, node.value))
                                 self._check_type(x, d.typ, node.value, body)
                             return body
                         else:

@@ -9,12 +9,12 @@ from dataclasses import dataclass
 from types import TracebackType, FrameType
 from typing import Callable, Sequence
 
-from flat.backend.lang import Lang
+from flat.py.shared import Range, get_range, print_details, NT, Lang
 
 __all__ = ['Type', 'BuiltinType', 'LangType', 'RefinedType', 'LitType',
            'UnionType', 'TupleType', 'ListType', 'SetType', 'DictType',
-           'Range', 'get_range', 'SOURCE', 'LINENO',
-           'check_arg_type', 'check_pre', 'check_type', 'check_post']
+           'SOURCE', 'LINENO', 'check_arg_type', 'check_pre', 'check_type', 'check_post',
+           'Range', 'NT', 'Lang']
 
 
 ## Types ##
@@ -46,7 +46,7 @@ class LangType(Type):
     lang: Lang
 
     def __contains__(self, value: object) -> bool:
-        return isinstance(value, str)  # TODO: parse
+        raise NotImplementedError
 
     def __str__(self) -> str:
         return f'lang({self.lang})'
@@ -93,14 +93,21 @@ class UnionType(Type):
 class TupleType(Type):
     """Tuple type."""
     elements: Sequence[Type]
+    variants: bool
 
     def __contains__(self, value: object) -> bool:
-        if not isinstance(value, tuple) or len(value) != len(self.elements):
-            return False
-        return all(v in t for v, t in zip(value, self.elements))
+        if isinstance(value, tuple) and len(value) >= len(self.elements):
+            if not self.variants and len(value) != len(self.elements):
+                return False
+
+            return all(v in t for v, t in zip(value, self.elements))
+
+        return False
 
     def __str__(self) -> str:
-        return f'tuple[{", ".join(str(t) for t in self.elements)}]'
+        prefix = ', '.join(str(t) for t in self.elements)
+        suffix = ', ...' if self.variants else ''
+        return f'tuple[{prefix}{suffix}]'
 
 
 @dataclass
@@ -109,9 +116,10 @@ class ListType(Type):
     element_type: Type
 
     def __contains__(self, value: object) -> bool:
-        if not isinstance(value, list):
-            return False
-        return all(v in self.element_type for v in value)
+        if isinstance(value, list):
+            return all(v in self.element_type for v in value)
+
+        return False
 
     def __str__(self) -> str:
         return f'list[{self.element_type}]'
@@ -144,37 +152,6 @@ class DictType(Type):
 
     def __str__(self) -> str:
         return f'dict[{self.key_type}, {self.value_type}]'
-
-
-@dataclass(frozen=True)
-class Range:
-    lineno: int
-    end_lineno: int
-    col_offset: int
-    end_col_offset: int
-
-    def to_rel(self, base_lineno: int | None = None) -> 'Range':
-        if base_lineno is None:
-            base_lineno = self.lineno
-        return Range(self.lineno - base_lineno + 1, self.end_lineno - base_lineno + 1,
-                     self.col_offset, self.end_col_offset)
-
-    def to_abs(self, base_lineno: int) -> 'Range':
-        return Range(base_lineno + self.lineno - 1, base_lineno + self.end_lineno - 1,
-                     self.col_offset, self.end_col_offset)
-
-
-def get_range(node: ast.AST) -> Range:
-    lineno = getattr(node, 'lineno')
-    end_lineno = getattr(node, 'end_lineno')
-    col_offset = getattr(node, 'col_offset')
-    end_col_offset = getattr(node, 'end_col_offset')
-
-    assert lineno is not None
-    assert end_lineno is not None
-    assert col_offset is not None
-    assert end_col_offset is not None
-    return Range(lineno, end_lineno, col_offset, end_col_offset)
 
 
 ## Checks ##
@@ -340,25 +317,6 @@ def check_post(cond: bool, cond_range: Range, return_range: Range) -> None:
         frame = frame.f_back  # caller of f
         assert frame is not None
         print_tb(frame)
-
-
-def print_details(file_path: str, caret_range: Range, details: Sequence[str],
-                  *, width: int | None = None, show_file_path: bool = True) -> None:
-    lineno_width = width if width is not None else len(str(caret_range.end_lineno))
-    if show_file_path:
-        print(' ' * lineno_width + f'--> {file_path}:{caret_range.lineno}', file=sys.stderr)
-
-    before_caret = ''
-    for lineno in range(caret_range.lineno, caret_range.end_lineno + 1):
-        line = linecache.getline(file_path, lineno)
-        lineno_str = str(lineno).ljust(lineno_width)
-        print(f'{lineno_str} |{line}', end='', file=sys.stderr)
-        start = caret_range.col_offset if lineno == caret_range.lineno else 0
-        end = caret_range.end_col_offset if lineno == caret_range.end_lineno else len(line)
-        before_caret = ' ' * lineno_width + ' |' + ' ' * start
-        print(before_caret + '^' * (end - start), file=sys.stderr)
-    for detail in details:
-        print(before_caret + detail, file=sys.stderr)
 
 
 def print_tb(frame: FrameType) -> None:

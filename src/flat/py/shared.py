@@ -2,10 +2,13 @@ import ast
 import linecache
 import sys
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Sequence, Mapping
 
-__all__ = ['Range', 'get_range', 'get_code', 'print_details']
+__all__ = ['Range', 'get_range', 'get_code', 'print_details',
+           'NT', 'Lang']
 
+
+## Position Range ##
 
 @dataclass(frozen=True)
 class Range:
@@ -69,3 +72,14 @@ def print_details(file_path: str, caret_range: Range, details: Sequence[str],
         print(before_caret + '^' * (end - start), file=sys.stderr)
     for detail in details:
         print(before_caret + detail, file=sys.stderr)
+
+
+## Language ##
+
+@dataclass(frozen=True)
+class NT:
+    """NonTerminal symbol."""
+    name: str
+
+
+type Lang = Mapping[str, Sequence[Sequence[str | NT]]]

@@ -21,7 +21,3 @@ def test(x: int) -> None:
 
 
 test(0)
-
-
-def f1(x: Literal[True, f]) -> Literal[False, None]:
-    return None if x else False

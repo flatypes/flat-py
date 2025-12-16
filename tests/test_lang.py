@@ -1,8 +1,9 @@
 import unittest
 
-from flat.backend.lang import NT, project, Lang
+from flat.backend.lang import project
 from flat.py.analyzer import analyze_lang
 from flat.py.compile_time import Context, LangType, Issuer
+from flat.py.shared import Lang, NT
 
 
 def parse_lang(grammar_source: str) -> Lang:

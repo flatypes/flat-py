@@ -1,8 +1,10 @@
 import ast
-from typing import Sequence
+from dataclasses import is_dataclass, astuple
+from typing import Sequence, Mapping
 
 __all__ = ['mk_eq', 'mk_attr', 'mk_call', 'mk_lambda', 'mk_assign', 'mk_foreach', 'mk_import_from',
-           'erase_ann', 'get_type_args', 'get_left_values', 'get_operands', 'is_ellipsis', 'is_pure']
+           'erase_ann', 'get_type_args', 'get_left_values', 'get_operands', 'is_ellipsis', 'is_pure',
+           'ExprSerializer']
 
 
 def mk_eq(left: ast.expr, right: ast.expr) -> ast.expr:
@@ -116,3 +118,33 @@ def is_pure(expr: ast.expr) -> bool:
             return (e1 is None or is_pure(e1)) and (e2 is None or is_pure(e2)) and (e3 is None or is_pure(e3))
         case _:
             return False
+
+
+class ExprSerializer:
+    def __init__(self, recognized_modules: Mapping[str, str]) -> None:
+        self.recognized_modules = recognized_modules
+
+    def serialize(self, value: object) -> ast.expr:
+        """Build an AST expression that represents the given value."""
+        if isinstance(value, (int, bool, str)):
+            return ast.Constant(value)
+
+        if value is None:
+            return ast.Constant(None)
+
+        if isinstance(value, Sequence):
+            return ast.List([self.serialize(elem) for elem in value])
+
+        if isinstance(value, Mapping):
+            return ast.Dict([self.serialize(k) for k in value.keys()],
+                            [self.serialize(v) for v in value.values()])
+
+        if is_dataclass(value):
+            module_name = type(value).__module__
+            if module_name in self.recognized_modules:
+                constr = self.recognized_modules[module_name] + '.' + type(value).__qualname__
+                args = astuple(value)  # type: ignore
+                return mk_call(constr, *[self.serialize(arg) for arg in args])
+
+        raise ValueError(f"Cannot serialize value {repr(value)} of "
+                         f"type '{type(value).__module__}.{type(value).__qualname__}'")
