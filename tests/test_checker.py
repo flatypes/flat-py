@@ -18,13 +18,14 @@ class Base(unittest.TestCase):
         self.assertEqual(actual_code, expected_code)
 
     def assert_rt_call_equal(self, actual: ast.AST, expected_rt_fun: str, *expected_args: str) -> None:
-        assert isinstance(actual, ast.Expr)
-        call = actual.value
-        assert isinstance(call, ast.Call)
-        assert isinstance(call.func, ast.Attribute)
-        self.assertEqual(call.func.attr, expected_rt_fun)
-        for actual_arg, expected_arg in zip(call.args, expected_args):
-            self.assertEqual(ast.unparse(actual_arg), expected_arg)
+        if isinstance(actual, ast.Expr) and isinstance(actual.value, ast.Call):
+            call = actual.value
+            assert isinstance(call.func, ast.Attribute)
+            self.assertEqual(call.func.attr, expected_rt_fun)
+            for actual_arg, expected_arg in zip(call.args, expected_args):
+                self.assertEqual(ast.unparse(actual_arg), expected_arg)
+        else:
+            self.fail(f'Unexpected rt call: {ast.dump(actual)}')
 
 
 class TestCheckTypeAnnot(Base):
@@ -312,25 +313,3 @@ class TestCheckAssign(Base):
         actual = check(tree, Issuer(), with_lineno=False)
         fun = cast(ast.FunctionDef, actual.body[-1])
         self.assert_rt_call_equal(fun.body[-1], 'check_type', 'x', 'rt.LitType([1])')
-
-# class TestInstrumentorNegative(unittest.TestCase):
-#     def process(self, code: str) -> Diagnostic:
-#         issuer = Issuer()
-#         ctx = Context('<test>', issuer)
-#         instrumentor = Instrumentor(ctx)
-#         input = ast.parse(dedent(code), filename='<test>')
-#         instrumentor.visit(input)
-#         errors = issuer.get_diagnostics()
-#         self.assertEqual(len(errors), 1)
-#         return errors[0]
-
-#     def test_redefine(self):
-#         diagnostic = self.process(
-#             """\
-#             from typing import Literal
-
-#             def f() -> None:
-#                 x = 1
-#                 x: Literal[2] = 2
-#             """)
-#         self.assertIsInstance(diagnostic, RedefinedName)

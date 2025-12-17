@@ -14,6 +14,8 @@ def refine(base_type: type, condition: str, /, *conditions: str) -> type:
 
 
 def requires(*conditions: str) -> Callable[..., Any]:
+    """Attach preconditions to a function."""
+
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         return func
 
@@ -21,6 +23,8 @@ def requires(*conditions: str) -> Callable[..., Any]:
 
 
 def ensures(*conditions: str) -> Callable[..., Any]:
+    """Attach postconditions to a function."""
+
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         return func
 
@@ -28,7 +32,14 @@ def ensures(*conditions: str) -> Callable[..., Any]:
 
 
 def returns(value: str) -> Callable[..., Any]:
+    """Attach the expected return value to a function."""
+
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         return func
 
     return decorator
+
+
+def fuzz(func: Callable[..., Any], /, *, num_inputs: int = 10, **producers: Any) -> None:
+    """Fuzz test the given function."""
+    pass

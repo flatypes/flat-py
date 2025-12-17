@@ -4,21 +4,23 @@ from abc import abstractmethod, ABC
 from dataclasses import dataclass
 from enum import Enum
 from types import EllipsisType
-from typing import Literal, Mapping, Sequence, Any
+from typing import Mapping, Sequence, Any
 
-from flat.py.ast_helpers import mk_call, mk_lambda, ExprSerializer
+from typing_extensions import override
+
+from flat.py.ast_helpers import mk_call, mk_lambda, mk_runtime
 from flat.py.shared import Range, print_details, Lang
 
 __all__ = ['Type', 'AnyType', 'BuiltinType', 'LangType', 'RefinedType',
            'LitValue', 'LitType', 'none_type', 'UnionType', 'TupleType', 'ListType',
            'SetType', 'DictType', 'ClassType', 'Contract', 'Require', 'Ensure',
-           'Def', 'AnnDef', 'TypeDef', 'TypeConstrDef', 'VarDef', 'ArgDef',
-           'FunDef', 'UnknownDef', 'Scope', 'Context',
+           'Def', 'AnnDef', 'TypeDef', 'TypeConstrDef', 'VarDef',
+           'Param', 'Params', 'FunDef', 'UnknownDef', 'Scope', 'Context',
            'Diagnostic', 'Level', 'Issuer',
            'InvalidSyntax', 'InvalidArg', 'InvalidValue',
            'UndefinedRule', 'RedefinedRule', 'NoStartRule',
            'EmptyRange', 'ArityMismatch', 'UndefinedName', 'RedefinedName',
-           'InvalidType', 'UndefinedNonlocal', 'InvalidTarget']
+           'InvalidType', 'UndefinedNonlocal', 'InvalidTarget', 'MissingKeyword', 'ExtraKeyword']
 
 
 class Type(ABC):
@@ -28,6 +30,10 @@ class Type(ABC):
     def to_runtime(self, rt: str) -> ast.expr:
         """Convert to runtime type."""
         raise NotImplementedError()
+
+    def synth_producer(self, rt: str) -> ast.expr | None:
+        """Synthesize a (runtime) producer."""
+        return None
 
 
 @dataclass(frozen=True)
@@ -53,8 +59,11 @@ class LangType(Type):
     name: ast.expr | None = None
 
     def to_runtime(self, rt: str) -> ast.expr:
-        serializer = ExprSerializer({'flat.py.shared': rt})
-        return mk_call(f'{rt}.LangType', serializer.serialize(self.lang))
+        return mk_call(f'{rt}.LangType', mk_runtime(self.lang, rt))
+
+    @override
+    def synth_producer(self, rt: str) -> ast.expr | None:
+        return mk_call(f'{rt}.ISLaProducer', mk_runtime(self.lang, rt))
 
 
 @dataclass(frozen=True)
@@ -62,9 +71,20 @@ class RefinedType(Type):
     base: Type
     conds: Sequence[ast.expr]
 
+    @property
+    def predicate_lambda(self) -> ast.expr:
+        return mk_lambda(['_'], ast.BoolOp(ast.And(), list(self.conds)))
+
     def to_runtime(self, rt: str) -> ast.expr:
-        return mk_call(f'{rt}.RefinedType', self.base.to_runtime(rt),
-                       mk_lambda(['_'], ast.BoolOp(ast.And(), list(self.conds))))
+        return mk_call(f'{rt}.RefinedType', self.base.to_runtime(rt), self.predicate_lambda)
+
+    @override
+    def synth_producer(self, rt: str) -> ast.expr | None:
+        producer = self.base.synth_producer(rt)
+        if producer:
+            return mk_call(f'{rt}.FilterProducer', producer, self.predicate_lambda)
+
+        return None
 
 
 type LitValue = str | bytes | bool | int | float | complex | None | EllipsisType
@@ -74,8 +94,16 @@ type LitValue = str | bytes | bool | int | float | complex | None | EllipsisType
 class LitType(Type):
     values: Sequence[LitValue]
 
+    @property
+    def value_list(self) -> ast.expr:
+        return ast.List([ast.Constant(v) for v in self.values])
+
     def to_runtime(self, rt: str) -> ast.expr:
-        return mk_call(f'{rt}.LitType', ast.List([ast.Constant(v) for v in self.values]))
+        return mk_call(f'{rt}.LitType', self.value_list)
+
+    @override
+    def synth_producer(self, rt: str) -> ast.expr | None:
+        return mk_call(f'{rt}.ChoiceProducer', self.value_list)
 
 
 none_type = LitType([None])
@@ -88,6 +116,18 @@ class UnionType(Type):
     def to_runtime(self, rt: str) -> ast.expr:
         return mk_call(f'{rt}.UnionType', ast.List([t.to_runtime(rt) for t in self.options]))
 
+    @override
+    def synth_producer(self, rt: str) -> ast.expr | None:
+        producers: list[ast.expr] = []
+        for t in self.options:
+            p = t.synth_producer(rt)
+            if p:
+                producers.append(p)
+            else:
+                return None
+
+        return mk_call(f'{rt}.UnionProducer', ast.List(producers))
+
 
 @dataclass(frozen=True)
 class TupleType(Type):
@@ -98,6 +138,21 @@ class TupleType(Type):
         return mk_call(f'{rt}.TupleType', ast.List([t.to_runtime(rt) for t in self.elements]),
                        ast.Constant(self.variant))
 
+    @override
+    def synth_producer(self, rt: str) -> ast.expr | None:
+        if self.variant:
+            return None
+
+        producers: list[ast.expr] = []
+        for t in self.elements:
+            p = t.synth_producer(rt)
+            if p:
+                producers.append(p)
+            else:
+                return None
+
+        return mk_call(f'{rt}.TupleProducer', ast.List(producers))
+
 
 @dataclass(frozen=True)
 class ListType(Type):
@@ -105,6 +160,14 @@ class ListType(Type):
 
     def to_runtime(self, rt: str) -> ast.expr:
         return mk_call(f'{rt}.ListType', self.element.to_runtime(rt))
+
+    @override
+    def synth_producer(self, rt: str) -> ast.expr | None:
+        elem_producer = self.element.synth_producer(rt)
+        if elem_producer:
+            return mk_call(f'{rt}.ListProducer', elem_producer)
+
+        return None
 
 
 @dataclass(frozen=True)
@@ -114,6 +177,14 @@ class SetType(Type):
     def to_runtime(self, rt: str) -> ast.expr:
         return mk_call(f'{rt}.SetType', self.element.to_runtime(rt))
 
+    @override
+    def synth_producer(self, rt: str) -> ast.expr | None:
+        elem_producer = self.element.synth_producer(rt)
+        if elem_producer:
+            return mk_call(f'{rt}.SetProducer', elem_producer)
+
+        return None
+
 
 @dataclass(frozen=True)
 class DictType(Type):
@@ -122,6 +193,15 @@ class DictType(Type):
 
     def to_runtime(self, rt: str) -> ast.expr:
         return mk_call(f'{rt}.DictType', self.key.to_runtime(rt), self.value.to_runtime(rt))
+
+    @override
+    def synth_producer(self, rt: str) -> ast.expr | None:
+        key_producer = self.key.synth_producer(rt)
+        value_producer = self.value.synth_producer(rt)
+        if key_producer and value_producer:
+            return mk_call(f'{rt}.DictProducer', key_producer, value_producer)
+
+        return None
 
 
 @dataclass(frozen=True)
@@ -177,18 +257,55 @@ class TypeConstrDef(Def):
 class VarDef(Def):
     """Variable definition."""
     typ: Type
+    is_arg: bool = False
 
 
 @dataclass(frozen=True)
-class ArgDef(VarDef):
-    """Function argument definition."""
-    kind: Literal['posonly', 'normal', '*', 'kwonly', '**']
-    default: ast.expr | None
+class Param:
+    name: str
+    typ: Type
+    default: ast.expr | None = None
+
+
+@dataclass(frozen=True)
+class Params:
+    pos_only: Sequence[Param]
+    ordinary: Sequence[Param]
+    pos_variadic: Param | None
+    kw_only: Sequence[Param]
+    kw_variadic: Param | None
+
+    @property
+    def names(self) -> Sequence[str]:
+        names = [p.name for p in self.pos_only]
+        names.extend(p.name for p in self.ordinary)
+        if self.pos_variadic:
+            names.append(self.pos_variadic.name)
+        names.extend(p.name for p in self.kw_only)
+        if self.kw_variadic:
+            names.append(self.kw_variadic.name)
+        return names
+
+    @property
+    def vars(self) -> Mapping[str, VarDef]:
+        vars: dict[str, VarDef] = {}
+        for p in self.pos_only:
+            vars[p.name] = VarDef(p.typ, is_arg=True)
+        for p in self.ordinary:
+            vars[p.name] = VarDef(p.typ, is_arg=True)
+        if self.pos_variadic:
+            vars[self.pos_variadic.name] = VarDef(ListType(self.pos_variadic.typ), is_arg=True)
+        for p in self.kw_only:
+            vars[p.name] = VarDef(p.typ, is_arg=True)
+        if self.kw_variadic:
+            vars[self.kw_variadic.name] = VarDef(DictType(BuiltinType('str'), self.kw_variadic.typ), is_arg=True)
+        return vars
 
 
 @dataclass(frozen=True)
 class FunDef(Def):
-    args: Sequence[str]
+    params: Params
+    arguments_tree: ast.arguments
     return_type: Type
     contracts: Sequence[Contract]
 
@@ -466,6 +583,26 @@ class UndefinedNonlocal(Diagnostic):
 class InvalidTarget(Diagnostic):
     def __init__(self, reason: str, file_path: str, target_pos: Range) -> None:
         super().__init__(file_path, target_pos, "invalid target")
+        self.reason = reason
+
+    @property
+    def details(self) -> Sequence[str]:
+        return [self.reason]
+
+
+class MissingKeyword(Diagnostic):
+    def __init__(self, reason: str, file_path: str, fun_pos: Range) -> None:
+        super().__init__(file_path, fun_pos, f"missing required keyword argument")
+        self.reason = reason
+
+    @property
+    def details(self) -> Sequence[str]:
+        return [self.reason]
+
+
+class ExtraKeyword(Diagnostic):
+    def __init__(self, reason: str, file_path: str, fun_pos: Range) -> None:
+        super().__init__(file_path, fun_pos, f"extra keyword argument")
         self.reason = reason
 
     @property
