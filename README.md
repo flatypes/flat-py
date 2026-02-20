@@ -20,23 +20,29 @@ send('<error>404</error>')
 ```
 
 FLAT-PY is a **Python testing framework** that aims to detect such **format/syntax incompatibility** issues and
-avoid unexceptional failures and severe vulnerabilities caused by them.
-We apply a syntax-aware type-directed approach, using the idea of **regarding Formal Languages as Types** (FLAT).
+avoid unexceptional failures and the severe vulnerabilities they cause.
+We apply a syntax-aware, type-directed approach, treating **Formal Languages as Types** (FLAT).
 
 Read our paper *FLAT: Formal Languages as Types* for more technical details.
 
 ## Features
 
-+ FLAY-PY offers convenient annotations for users to define formal language types and
-  to attach them directly to Python code.
-+ FLAY-PY comes with ready-to-use types for email addresses, URLs, and JSON.
-+ FLAY-PY allows arbitrary Python expressions/functions as expressive semantic constraints.
-+ FLAY-PY provides annotations to specify oracles/contracts in the pre-/post-condition style.
-+ FLAY-PY integrates language-based test generation to fuzz your code with random inputs generated from language types.
++ Convenient annotations for users to define formal language types and to attach them directly to Python code.
++ Built-in types for email addresses, URLs, and JSON (and more in future).
++ Arbitrary Python expressions/functions as expressive semantic constraints.
++ Pre-/post-conditions as test oracles and contracts.
++ Language-based fuzzing for free.
+
+FLAT-PY is an *all-in-one* framework that reduces user efforts in
++ API documentation (formal language specifications),
++ input validations (automated runtime type checking),
++ malicious input detection (language types define the secured input space),
++ language-based fuzzing (the `fuzz` annotation),
++ test oracles (via pre-/post-conditions).
 
 ## Quick Tour by Example
 
-Consider an ad hoc parser that aims to extract the hostname part form the input `url`:
+Consider an ad hoc parser that aims to extract the hostname part from the input `url`:
 
 ```python
 def get_hostname(url: str) -> str:
@@ -76,7 +82,7 @@ DROP TABLE users --')
 
 ### Solution: Language Types
 
-Such an issue can be avoided if we force the `url` input to be a valid URL string but not any string.
+Such an issue can be avoided if we force the `url` input to be a valid URL but not any string.
 In FLAT-PY, we achieve this by **refining** the type signature of the `get_hostname` function:
 
 ```python
@@ -87,7 +93,7 @@ def get_hostname(url: URL) -> Host:
     ...
 ```
 
-The language types `URL`[^2] and `Host` restrict the set of valid strings for the input and the output respectively.
+The language types `URL`[^2] and `Host` restrict the set of valid strings for the input and the output, respectively.
 Feeding `malicious_url` to `get_hostname` now causes a type error:
 
 ```text
@@ -121,12 +127,12 @@ print_fuzz_report(report)
 ```
 
 Note that the implementation of `get_hostname` is buggy:
-it cannot handle URLs with empty paths correctly, e.g., `http://W`.
+it cannot correctly handle URLs with empty paths, e.g., `http://W`.
 
 ### Oracles
 
 Apart from format validation/checking, functional correctness is also of great importance.
-The contract that describes the required behaviors can be used as **test oracles**.
+The contract that describes the required behaviors can serve as a **test oracle**.
 FLAT-PY offers `requires` and `ensures` decorators to specify pre-/post-conditions,
 and a `select` function to extract a particular substring via an XPath:
 
@@ -140,8 +146,8 @@ def get_hostname(url: URL) -> Host:
     ...
 ```
 
-This post-condition states that the output value (bound to the last lambda parameter `ret`) equals to
-the hostname extracted by `..host`: it refers to the (unique) node labeled with nonterminal symbol `host`,
+This post-condition states that the output value (bound to the last lambda parameter `ret`) equals the hostname extracted by `..host`:
+it refers to the (unique) node labeled with nonterminal symbol `host`,
 which refers to the hostname part, in the derivation tree of `url`.
 
 For the full example, see `examples/demo/hostname.py`.
@@ -165,7 +171,7 @@ docker run -it flat-py:latest
 ### Option 2: From Source (in Unix)
 
 Python `>= 3.11` is required.
-To compile `z3-solver` dependency of ISLa, you need `gcc`, `g++`, `make`, and `cmake`.
+To compile the `z3-solver` dependency of ISLa, you need `gcc`, `g++`, `make`, and `cmake`.
 
 We recommend setting up a virtual environment. In the project root directory:
 
@@ -190,9 +196,9 @@ The basic usage is:
 python -m flat.py [-o OUTPUT_DIR] INPUT_FILE
 ```
 
-FLAT-PY processes the user Python file `INPUT_FILE` attached with FLAT annotations,
+FLAT-PY processes the user's Python file `INPUT_FILE` attached with FLAT annotations,
 and generates an **instrumented** version in `OUTPUT_DIR` (default: `examples/out/`).
-Run this instrumented version to see if there are any type errors.
+Run this instrumented version to check for any type errors.
 
 For example, to check the `hostname.py` example:
 
@@ -201,7 +207,7 @@ python -m flat.py examples/demo/hostname.py
 python examples/out/hostname.py
 ```
 
-To check all the examples in directory `examples/demos`, run:
+To check all the examples in the directory `examples/demos`, run:
 
 ```shell
 python run_demos.py
@@ -220,4 +226,4 @@ python run_cases.py
 This will take a couple of minutes.
 
 [^1]: Lyrics from the song "You Give REST a Bad Name" (https://dylanbeattie.net/songs/bad_name.html).
-[^2]: Here we only consider a simplified version of URLs with no IP addresses, queries, and fragments.
+[^2]: Here, we only consider a simplified version of URLs without IP addresses, queries, or fragments.
