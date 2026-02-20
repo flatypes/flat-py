@@ -40,6 +40,79 @@ FLAT-PY is an *all-in-one* framework that reduces user efforts in
 + language-based fuzzing (the `fuzz` annotation),
 + test oracles (via pre-/post-conditions).
 
+## Build
+
+### Option 1: Via Docker
+
+In the project root directory, build the image first:
+
+```shell
+docker build -t flat-py .
+```
+
+This can take a while. Once the image is successfully built, you can enter its bash shell:
+
+```shell
+docker run -it flat-py:latest
+```
+
+### Option 2: From Source (in Unix)
+
+As ISLa is still using the deprecated `pkg_resources`, it is recommended to use Python `3.11`.
+
+Setting up a virtual environment is recommended. In the project root directory:
+
+```shell
+python3.11 -m venv .venv
+source .venv/bin/activate
+```
+
+In the virtual environment, install dependencies and test the CLI:
+
+```shell
+pip install --upgrade pip
+pip install -e .
+python -m flat.py --help
+```
+
+Setting up the development environment with `mypy`:
+
+```shell
+pip install -e ".[dev]"
+```
+
+Generating distribution packages with `build`:
+
+```shell
+pip install --upgrade build
+python -m build
+```
+
+## Usage
+
+The basic usage is:
+
+```shell
+python -m flat.py [-o OUTPUT_DIR] INPUT_FILE
+```
+
+FLAT-PY processes the user's Python file `INPUT_FILE` attached with FLAT annotations,
+and generates an **instrumented** version in `OUTPUT_DIR` (default: `examples/out/`).
+Run this instrumented version to check for any type errors.
+
+For example, to check the `hostname.py` example:
+
+```shell
+python -m flat.py examples/demo/hostname.py
+python examples/out/hostname.py
+```
+
+To check all the examples in the directory `examples/demos`, run:
+
+```shell
+python run_demos.py
+```
+
 ## Quick Tour by Example
 
 Consider an ad hoc parser that aims to extract the hostname part from the input `url`:
@@ -151,67 +224,6 @@ it refers to the (unique) node labeled with nonterminal symbol `host`,
 which refers to the hostname part, in the derivation tree of `url`.
 
 For the full example, see `examples/demo/hostname.py`.
-
-## Build
-
-### Option 1: Via Docker
-
-In the project root directory, build the image first:
-
-```shell
-docker build -t flat-py .
-```
-
-This can take a while. Once the image is successfully built, you can enter its bash shell:
-
-```shell
-docker run -it flat-py:latest
-```
-
-### Option 2: From Source (in Unix)
-
-Python `>= 3.11` is required.
-To compile the `z3-solver` dependency of ISLa, you need `gcc`, `g++`, `make`, and `cmake`.
-
-We recommend setting up a virtual environment. In the project root directory:
-
-```shell
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-Once you see the prompt `(.venv)` in your shell, execute the following to install FLAT-PY locally:
-
-```shell
-pip install --upgrade pip setuptools
-pip install -r requirements.txt
-pip install .
-```
-
-## Usage
-
-The basic usage is:
-
-```shell
-python -m flat.py [-o OUTPUT_DIR] INPUT_FILE
-```
-
-FLAT-PY processes the user's Python file `INPUT_FILE` attached with FLAT annotations,
-and generates an **instrumented** version in `OUTPUT_DIR` (default: `examples/out/`).
-Run this instrumented version to check for any type errors.
-
-For example, to check the `hostname.py` example:
-
-```shell
-python -m flat.py examples/demo/hostname.py
-python examples/out/hostname.py
-```
-
-To check all the examples in the directory `examples/demos`, run:
-
-```shell
-python run_demos.py
-```
 
 ## Case Studies
 
