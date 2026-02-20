@@ -42,22 +42,6 @@ FLAT-PY is an *all-in-one* framework that reduces user efforts in
 
 ## Build
 
-### Option 1: Via Docker
-
-In the project root directory, build the image first:
-
-```shell
-docker build -t flat-py .
-```
-
-This can take a while. Once the image is successfully built, you can enter its bash shell:
-
-```shell
-docker run -it flat-py:latest
-```
-
-### Option 2: From Source (in Unix)
-
 As ISLa is still using the deprecated `pkg_resources`, it is recommended to use Python `3.11`.
 
 Setting up a virtual environment is recommended. In the project root directory:
